@@ -5,9 +5,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
+	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/eventbus"
+	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/statemachine"
 	"github.com/firebase/genkit/go/genkit"
+	"github.com/google/uuid"
 )
 
 // DragonScale is the main entry point into the dragonscale-genkit runtime.
@@ -19,12 +23,17 @@ type DragonScale struct {
 	retriever Retriever
 	solver    Solver
 	cache     Cache
+	eventBus  eventbus.EventBus
 
 	// Available tools
 	tools map[string]Tool
 
 	// Configuration
 	config Config
+	
+	// Async processing
+	asyncExecutions     map[string]*statemachine.ProcessContext
+	asyncExecutionsMutex sync.RWMutex
 }
 
 // Config holds the configuration options for the DragonScale runtime.
@@ -41,6 +50,11 @@ type Config struct {
 
 	// Enable/disable context retrieval
 	EnableRetrieval bool
+	
+	// Event bus configuration
+	EnableEventBus bool
+	EventBusBufferSize int
+	EventBusWorkerCount int
 }
 
 // Executor interface for running execution plans
@@ -56,6 +70,9 @@ func DefaultConfig() Config {
 		RetryDelay:              time.Second * 2,
 		ExecutionTimeout:        time.Minute * 5,
 		EnableRetrieval:         true,
+		EnableEventBus:          true,
+		EventBusBufferSize:      100,
+		EventBusWorkerCount:     5,
 	}
 }
 
@@ -125,8 +142,9 @@ func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale
 
 	// Create with default configuration
 	ds := &DragonScale{
-		config: DefaultConfig(),
-		tools:  make(map[string]Tool),
+		config:           DefaultConfig(),
+		tools:            make(map[string]Tool),
+		asyncExecutions:  make(map[string]*statemachine.ProcessContext),
 	}
 
 	// Apply options
@@ -153,6 +171,16 @@ func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale
 
 	if len(ds.tools) == 0 {
 		return nil, fmt.Errorf("at least one tool is required")
+	}
+	
+	// Initialize event bus if enabled but not provided
+	if ds.config.EnableEventBus && ds.eventBus == nil {
+		// Create a default channel-based event bus
+		ds.eventBus = eventbus.NewChannelEventBus(
+			eventbus.WithBufferSize(ds.config.EventBusBufferSize),
+			eventbus.WithWorkerCount(ds.config.EventBusWorkerCount),
+		)
+		log.Printf("Initialized default channel-based event bus")
 	}
 
 	return ds, nil
@@ -185,56 +213,133 @@ func (d *DragonScale) GetToolSchemas() map[string]string {
 	return schemas
 }
 
-// Process handles an end-to-end query execution through the DragonScale runtime.
+// Process handles an end-to-end query execution through the DragonScale runtime
+// using a pushdown automaton state machine approach.
 func (d *DragonScale) Process(ctx context.Context, query string) (string, error) {
-	// 1. Prepare Planner Input
-	plannerInput := PlannerInput{
-		Query:      query,
-		ToolSchema: d.GetToolSchemas(),
-	}
+	// Create a state machine for processing
+	stateMachine := d.createStateMachine()
+	
+	// Create an initial process context with the query
+	processContext := statemachine.NewProcessContext(query)
+	
+	// Execute the state machine until completion or error
+	return stateMachine.Execute(ctx, processContext)
+}
 
-	// 2. Generate Execution Plan
-	executionPlan, err := d.planner.GeneratePlan(ctx, plannerInput)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate execution plan: %w", err)
+// createStateMachine builds a state machine with all necessary transitions
+// for the DragonScale processing workflow.
+func (d *DragonScale) createStateMachine() *statemachine.StateMachine {
+	// Determine if event bus should be used
+	var eventBus eventbus.EventBus
+	if d.config.EnableEventBus {
+		eventBus = d.eventBus
 	}
-
-	// 3. Execute the Plan
-	executionResults, err := d.executor.ExecutePlan(ctx, executionPlan)
-	if err != nil {
-		return "", fmt.Errorf("DAG execution failed: %w", err)
+	
+	// Build components structure to pass to state machine
+	components := statemachine.DragonScaleComponents{
+		Planner:   d.planner,
+		Executor:  d.executor,
+		Retriever: d.retriever,
+		Solver:    d.solver,
+		Tools:     make(map[string]interface{}),
+		Config:    d.config,
+		GetSchemas: func() map[string]string {
+			return d.GetToolSchemas()
+		},
 	}
-
-	// 4. Retrieve Context (if enabled)
-	var retrievedContext string
-	if d.config.EnableRetrieval && d.retriever != nil {
-		retrievedContext, err = d.retriever.RetrieveContext(ctx, query, executionPlan)
-		if err != nil {
-			log.Printf("Context retrieval failed: %v", err)
-			// Continue without context on failure
-		}
+	
+	// Add tools
+	for name, tool := range d.tools {
+		components.Tools[name] = tool
 	}
-
-	// 5. Synthesize Final Answer
-	finalAnswer, err := d.solver.Synthesize(ctx, query, executionResults, retrievedContext)
-	if err != nil {
-		return "", fmt.Errorf("failed to synthesize final answer: %w", err)
-	}
-
-	return finalAnswer, nil
+	
+	// Create and return the state machine
+	return statemachine.CreateProcessStateMachine(components, eventBus)
 }
 
 // ProcessAsync starts an asynchronous query execution.
 // It returns a unique execution ID that can be used to check the status or get the result.
 func (d *DragonScale) ProcessAsync(ctx context.Context, query string) (string, error) {
-	// This is a placeholder for future implementation
-	// In a real implementation, this would:
-	// 1. Generate a unique execution ID
-	// 2. Start a goroutine to process the query
-	// 3. Store intermediate results in a state store
-	// 4. Return the execution ID immediately
-
-	return "not-implemented-yet", fmt.Errorf("async processing not implemented yet")
+	// Generate a unique execution ID
+	executionID := uuid.New().String()
+	
+	// Create a state machine for processing
+	stateMachine := d.createStateMachine()
+	
+	// Create an initial process context with the query
+	processContext := statemachine.NewProcessContext(query)
+	
+	// Store the process context in our map
+	d.asyncExecutionsMutex.Lock()
+	d.asyncExecutions[executionID] = processContext
+	d.asyncExecutionsMutex.Unlock()
+	
+	// Create a new background context with cancellation for this async operation
+	asyncCtx, cancel := context.WithCancel(context.Background())
+	
+	// Store the cancel function in the state data for potential cancellation
+	processContext.StateData["cancel"] = cancel
+	
+	// Check if event bus is available
+	if d.config.EnableEventBus && d.eventBus != nil {
+		// Publish event for async processing started
+		startEvent := eventbus.NewEvent(
+			eventbus.EventQueryAsyncProcessingStarted,
+			query,
+			"DragonScale.ProcessAsync",
+			map[string]interface{}{
+				"timestamp":    time.Now().Format(time.RFC3339),
+				"execution_id": executionID,
+			},
+		)
+		d.eventBus.Publish(ctx, startEvent)
+	}
+	
+	// Start a goroutine to execute the state machine
+	go func() {
+		defer cancel() // Ensure context is cancelled when goroutine exits
+		
+		// Execute the state machine
+		result, err := stateMachine.Execute(asyncCtx, processContext)
+		
+		// Update the process context with the final result
+		d.asyncExecutionsMutex.Lock()
+		if pCtx, exists := d.asyncExecutions[executionID]; exists {
+			pCtx.FinalAnswer = result
+			if err != nil {
+				pCtx.SetError(err, string(pCtx.CurrentState))
+			} else {
+				pCtx.Complete()
+			}
+		}
+		d.asyncExecutionsMutex.Unlock()
+		
+		// Publish completion event if event bus is available
+		if d.config.EnableEventBus && d.eventBus != nil {
+			eventType := eventbus.EventQueryAsyncProcessingSuccess
+			metadata := map[string]interface{}{
+				"execution_id": executionID,
+				"duration_ms":  processContext.GetTotalDuration().Milliseconds(),
+			}
+			
+			if err != nil {
+				eventType = eventbus.EventQueryAsyncProcessingFailure
+				metadata["error"] = err.Error()
+				metadata["error_stage"] = processContext.ErrorStage
+			}
+			
+			completionEvent := eventbus.NewEvent(
+				eventType,
+				query,
+				"DragonScale.ProcessAsync",
+				metadata,
+			)
+			// Use background context since original context might be done
+			d.eventBus.Publish(context.Background(), completionEvent)
+		}
+	}()
+	
+	return executionID, nil
 }
 
 // GetToolByName returns a tool by its name, or an error if not found.

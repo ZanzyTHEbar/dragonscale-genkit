@@ -5,6 +5,8 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/ZanzyTHEbar/errbuilder-go"
 )
 
 // InMemoryCache provides a simple thread-safe in-memory cache.
@@ -25,34 +27,42 @@ func NewInMemoryCache(defaultTTL time.Duration) *InMemoryCache {
 		store: make(map[string]cacheItem),
 		ttl:   defaultTTL,
 	}
-	// Optional: Start a background cleanup goroutine
+	// Start a background cleanup goroutine
 	go c.cleanupLoop(10 * time.Minute)
 	return c
 }
 
 // Get retrieves an item from the cache.
-func (c *InMemoryCache) Get(ctx context.Context, key string) (interface{}, bool) {
+func (c *InMemoryCache) Get(ctx context.Context, key string) (interface{}, error) {
+	// Check context cancellation first
+	if err := errbuilder.WrapIfContextDone(ctx, nil); err != nil {
+		return nil, err
+	}
+
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
 	item, found := c.store[key]
 	if !found {
-		return nil, false
+		return nil, errbuilder.NotFoundErr(errbuilder.GenericErr("cache item not found", nil))
 	}
 
 	if time.Now().UnixNano() > item.expiration {
 		// Item expired (lazy cleanup)
-		// We could delete it here, but need write lock. For now, just report not found.
-		// Potential enhancement: trigger cleanup or delete under RUnlock/Lock sequence.
 		log.Printf("Cache item expired: %s", key)
-		return nil, false
+		return nil, errbuilder.NotFoundErr(errbuilder.GenericErr("cache item expired", nil))
 	}
 
-	return item.value, true
+	return item.value, nil
 }
 
 // Set adds or updates an item in the cache.
-func (c *InMemoryCache) Set(ctx context.Context, key string, value interface{}) {
+func (c *InMemoryCache) Set(ctx context.Context, key string, value interface{}) error {
+	// Check context cancellation first
+	if err := errbuilder.WrapIfContextDone(ctx, nil); err != nil {
+		return err
+	}
+
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -62,6 +72,7 @@ func (c *InMemoryCache) Set(ctx context.Context, key string, value interface{}) 
 		expiration: expiration,
 	}
 	log.Printf("Cache item set: %s", key)
+	return nil
 }
 
 // cleanupLoop periodically removes expired items (optional).

@@ -1,3 +1,4 @@
+// filepath: /mnt/dragonnet/common/Projects/Personal/General/genkit/internal/executor/executor.go
 package executor
 
 import (
@@ -12,6 +13,7 @@ import (
 	"container/heap"
 
 	"github.com/ZanzyTHEbar/dragonscale-genkit"
+	"github.com/ZanzyTHEbar/errbuilder-go"
 )
 
 // Define TaskNode for the priority queue
@@ -289,14 +291,11 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 		completionChan <- task
 	}() // Signal completion regardless of outcome
 
-	// Check for cancellation
-	select {
-	case <-ctx.Done():
-		task.UpdateStatus(dragonscale.TaskStatusCancelled, ctx.Err())
+	// Check for cancellation using errbuilder
+	if err := errbuilder.WrapIfContextDone(ctx, nil); err != nil {
+		task.UpdateStatus(dragonscale.TaskStatusCancelled, err)
 		task.SetErrorContext("Task cancelled due to context cancellation")
 		return
-	default:
-		// Continue execution
 	}
 
 	task.UpdateStatus(dragonscale.TaskStatusRunning, nil)
@@ -308,17 +307,33 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 	// Get the tool from the registry
 	tool, exists := e.toolRegistry[task.ToolName]
 	if !exists {
-		err := fmt.Errorf("tool '%s' not found in registry", task.ToolName)
+		var errs errbuilder.ErrorMap
+		errs.Set("tool", task.ToolName)
+		errs.Set("task_id", task.ID)
+		err := errbuilder.NotFoundErr(errbuilder.NewErrDetails(errs).Errors)
 		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
 		task.SetErrorContext("Tool not found in registry")
+		return
+	}
+	
+	// Simple validation - no need to use assert-lib for this case
+	if tool == nil {
+		var errs errbuilder.ErrorMap
+		errs.Set("validation", "Tool must not be nil")
+		err := errbuilder.ValidationErr(errbuilder.NewErrDetails(errs).Errors)
+		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
+		task.SetErrorContext("Tool validation failed")
 		return
 	}
 
 	// Resolve arguments
 	resolvedArgs, err := e.resolveArguments(ctx, task.Args, plan)
 	if err != nil {
-		errWithContext := fmt.Errorf("failed to resolve args for task %s: %w", task.ID, err)
-		task.UpdateStatus(dragonscale.TaskStatusFailed, errWithContext)
+		var errs errbuilder.ErrorMap
+		errs.Set("task_id", task.ID)
+		errs.Set("cause", err.Error())
+		err := errbuilder.GenericErr("argument resolution failed", err)
+		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
 		task.SetErrorContext("Argument resolution failed")
 		return
 	}
@@ -354,16 +369,28 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 		// Handle based on error type
 		if ctx.Err() != nil {
 			// Parent context was cancelled, no point retrying
-			execErr = ctx.Err()
+			var errs errbuilder.ErrorMap
+			errs.Set("cause", err.Error())
+			errs.Set("context_error", ctx.Err().Error())
+			execErr = errbuilder.GenericErr("context cancelled", err)
 			task.SetErrorContext("Parent context cancelled during execution")
 			break
 		} else if execCtx.Err() != nil && execCtx.Err() == context.DeadlineExceeded {
 			// Execution timed out
-			execErr = fmt.Errorf("task execution timed out after %v: %w", execTimeout, err)
+			var errs errbuilder.ErrorMap
+			errs.Set("task_id", task.ID)
+			errs.Set("tool", task.ToolName)
+			errs.Set("timeout", execTimeout.String())
+			errs.Set("cause", err.Error())
+			execErr = errbuilder.GenericErr("execution timeout", err)
 			task.SetErrorContext("Execution timed out")
 		} else {
 			// Other error
-			execErr = err
+			var errs errbuilder.ErrorMap
+			errs.Set("task_id", task.ID)
+			errs.Set("tool", task.ToolName)
+			errs.Set("cause", err.Error())
+			execErr = errbuilder.GenericErr("tool execution", err)
 			task.SetErrorContext(fmt.Sprintf("Execution failed: %v", err))
 		}
 
@@ -395,13 +422,30 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 	}
 
 	if err != nil {
-		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
+		// Create a structured error with details about the failure
+		var errs errbuilder.ErrorMap
+		errs.Set("task_id", task.ID)
+		errs.Set("tool", task.ToolName)
+		errs.Set("retry_count", retryAttempt)
+		errs.Set("max_retries", maxRetries)
+		finalErr := errbuilder.GenericErr("task execution failed after retries", err)
+		task.UpdateStatus(dragonscale.TaskStatusFailed, finalErr)
 		log.Printf("Task execution failed after retries (task_id: %s, tool: %s, error: %v, retries: %d)",
 			task.ID,
 			task.ToolName,
-			err,
+			finalErr,
 			retryAttempt)
 	} else {
+		// Simple validation - no need to use assert-lib for this case
+		if result == nil {
+			var errs errbuilder.ErrorMap
+			errs.Set("validation", "Tool execution result cannot be nil")
+			err := errbuilder.ValidationErr(errbuilder.NewErrDetails(errs).Errors)
+			task.UpdateStatus(dragonscale.TaskStatusFailed, err)
+			task.SetErrorContext("Result validation failed")
+			return
+		}
+		
 		// Store result(s) - assuming a standard output key for simplicity, might need refinement
 		outputResult := result["output"] // Adjust based on actual Tool output structure
 		task.Result = outputResult

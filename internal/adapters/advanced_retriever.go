@@ -10,11 +10,18 @@ import (
 	"github.com/firebase/genkit/go/ai"
 )
 
-// VectorStoreRetriever implements the Retriever interface using vector storage.
+// AdvancedRetriever implements the Retriever interface using vector storage.
+// We want to use: 
+// - vector-based semantic retrieval
+// - BM25 key-word retrieval
+// - SQL retrieval
+// - Graph retrieval
+// - Genkit Flow-based retrieval
+// - Hybrid retriever utilizing Matryoshka Retrieval strategy
+// - Combines
 
 
-
-type VectorStoreRetriever struct {
+type AdvancedRetriever struct {
 	genkitRetriever ai.Retriever
 	embedder        ai.Embedder
 	maxResults      int
@@ -22,38 +29,17 @@ type VectorStoreRetriever struct {
 	contextWindow   int
 }
 
-// VectorStoreRetrieverOption is a function that configures a VectorStoreRetriever.
-type VectorStoreRetrieverOption func(*VectorStoreRetriever)
+// AdvancedRetrieverOption is a function that configures a AdvancedRetriever.
+type AdvancedRetrieverOption func(*AdvancedRetriever)
 
-// WithMaxResults sets the maximum number of results to return.
-func WithMaxResults(max int) VectorStoreRetrieverOption {
-	return func(r *VectorStoreRetriever) {
-		r.maxResults = max
-	}
-}
-
-// WithMinScore sets the minimum similarity score for results.
-func WithMinScore(min float64) VectorStoreRetrieverOption {
-	return func(r *VectorStoreRetriever) {
-		r.minScore = min
-	}
-}
-
-// WithContextWindow sets the maximum tokens to include in context window.
-func WithContextWindow(windowSize int) VectorStoreRetrieverOption {
-	return func(r *VectorStoreRetriever) {
-		r.contextWindow = windowSize
-	}
-}
-
-// NewVectorStoreRetriever creates a new vector store-based retriever.
-func NewVectorStoreRetriever(
+// NewAdvancedRetriever creates a new vector store-based retriever.
+func NewAdvancedRetriever(
 	genkitRetriever ai.Retriever,
 	embedder ai.Embedder,
-	options ...VectorStoreRetrieverOption,
-) *VectorStoreRetriever {
+	options ...AdvancedRetrieverOption,
+) *AdvancedRetriever {
 	// Default configuration
-	retriever := &VectorStoreRetriever{
+	retriever := &AdvancedRetriever{
 		genkitRetriever: genkitRetriever,
 		embedder:        embedder,
 		maxResults:      5,
@@ -70,7 +56,7 @@ func NewVectorStoreRetriever(
 }
 
 // RetrieveContext implements the dragonscale.Retriever interface.
-func (r *VectorStoreRetriever) RetrieveContext(ctx context.Context, query string, dag *dragonscale.ExecutionPlan) (string, error) {
+func (r *AdvancedRetriever) RetrieveContext(ctx context.Context, query string, dag *dragonscale.ExecutionPlan) (string, error) {
 	startTime := time.Now()
 	log.Printf("Vector retrieval starting (query: %s)", query)
 

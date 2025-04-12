@@ -12,6 +12,10 @@ cloud.google.com/go/compute/metadata v0.5.0/go.mod h1:aHnloV2TPI38yx4s9+wAZhHykW
 cloud.google.com/go/compute/metadata v0.6.0 h1:A6hENjEsCDtC1k8byVsgwvVcioamEHvZ4j01OwKxG9I=
 cloud.google.com/go/compute/metadata v0.6.0/go.mod h1:FjyFAW1MW0C203CEOMDTu3Dk1FlqW3Rga40jzHL4hfg=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
+github.com/ZanzyTHEbar/assert-lib v1.2.0 h1:foJBexKzoNmj7Vecyile6MP9iOVuY79vymd62A42I4w=
+github.com/ZanzyTHEbar/assert-lib v1.2.0/go.mod h1:RADC9rZKqbZg/a5Drk5pmU1j+hehlrPfMNkEyXq+/K8=
+github.com/ZanzyTHEbar/errbuilder-go v1.5.0 h1:+f6pSF+pu4XH1h0gIdYjFuX/RGeBcLEMywxDUDYc78Y=
+github.com/ZanzyTHEbar/errbuilder-go v1.5.0/go.mod h1:Zrmdx0mbbM7XhaOn7QIDu1AxNj230DiAFGfMOpZdPYg=
 github.com/aymerick/raymond v2.0.2+incompatible h1:VEp3GpgdAnv9B2GFyTvqgcKvY+mfKMjPOA3SbKLtnU0=
 github.com/aymerick/raymond v2.0.2+incompatible/go.mod h1:osfaiScAUVup+UC9Nfq76eWqDhXlp+4UYaA8uhTBO6g=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
