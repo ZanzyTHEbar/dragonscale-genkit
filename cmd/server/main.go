@@ -122,7 +122,7 @@ func main() {
 	retrieverFlow := genkit.DefineFlow(g, "retrieverFlow",
 		func(ctx context.Context, query *string) (string, error) {
 			log.Printf("Retriever flow starting (placeholder) (query: %s)", *query)
-			// In a real scenario, this would fetch relevant data
+			// TODO: In a real scenario, this would fetch relevant data
 			return "", nil // Returning empty context for now
 		},
 	)
