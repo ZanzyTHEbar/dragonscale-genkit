@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
+	"github.com/ZanzyTHEbar/dragonscale-genkit"
 	"github.com/firebase/genkit/go/core"
 )
 

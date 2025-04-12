@@ -7,8 +7,8 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/ZanzyTHEbar/dragonscale-genkit"
 	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/adapters"
-	"github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
 )
 
 // SetupTools creates and returns a map of all available tools.

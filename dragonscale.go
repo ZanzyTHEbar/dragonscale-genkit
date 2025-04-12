@@ -62,7 +62,7 @@ func DefaultConfig() Config {
 // Option is a function that configures a DragonScale instance.
 type Option func(*DragonScale)
 
-// WithConfig sets the configuration for DragonScale.
+// WithConfig sets the configuration for
 func WithConfig(config Config) Option {
 	return func(d *DragonScale) {
 		d.config = config

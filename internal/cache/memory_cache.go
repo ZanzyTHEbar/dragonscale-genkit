@@ -26,7 +26,7 @@ func NewInMemoryCache(defaultTTL time.Duration) *InMemoryCache {
 		ttl:   defaultTTL,
 	}
 	// Optional: Start a background cleanup goroutine
-	// go c.cleanupLoop(10 * time.Minute)
+	go c.cleanupLoop(10 * time.Minute)
 	return c
 }
 

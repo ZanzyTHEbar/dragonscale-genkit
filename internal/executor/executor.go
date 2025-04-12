@@ -11,7 +11,7 @@ import (
 
 	"container/heap"
 
-	"github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
+	"github.com/ZanzyTHEbar/dragonscale-genkit"
 )
 
 // Define TaskNode for the priority queue

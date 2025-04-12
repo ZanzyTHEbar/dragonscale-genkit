@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
+	"github.com/ZanzyTHEbar/dragonscale-genkit"
 	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/genkit"
 )

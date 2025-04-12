@@ -39,7 +39,7 @@ go get github.com/ZanzyTHEbar/dragonscale-genkit
 ### Using as a module in your project
 
 ```go
-import "github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
+import "github.com/ZanzyTHEbar/dragonscale-genkit"
 ```
 
 ## Quick Start
@@ -56,7 +56,7 @@ import (
     "github.com/ZanzyTHEbar/dragonscale-genkit/internal/cache"
     "github.com/ZanzyTHEbar/dragonscale-genkit/internal/executor"
     "github.com/ZanzyTHEbar/dragonscale-genkit/internal/tools"
-    "github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
+    "github.com/ZanzyTHEbar/dragonscale-genkit"
     "github.com/firebase/genkit/go/genkit"
 )
 
