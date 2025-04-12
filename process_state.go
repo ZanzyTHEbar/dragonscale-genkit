@@ -1,5 +1,4 @@
-// Package statemachine provides state machine implementations for DragonScale workflows.
-package statemachine
+package dragonscale
 
 import (
 	"context"

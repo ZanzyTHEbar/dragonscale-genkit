@@ -1,4 +1,4 @@
-package statemachine
+package dragonscale
 
 import (
 	"context"
@@ -8,17 +8,6 @@ import (
 
 	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/eventbus"
 )
-
-// DragonScaleComponents holds references to the core components needed for state transitions.
-type DragonScaleComponents struct {
-	Planner    interface{} // Will be cast to appropriate type
-	Executor   interface{} // Will be cast to appropriate type
-	Retriever  interface{} // Will be cast to appropriate type
-	Solver     interface{} // Will be cast to appropriate type
-	Tools      map[string]interface{}
-	Config     interface{} // Will be accessed for settings
-	GetSchemas func() map[string]string
-}
 
 // CreateProcessStateMachine builds a complete state machine for the process workflow.
 func CreateProcessStateMachine(components DragonScaleComponents, eventBus eventbus.EventBus) *StateMachine {
@@ -225,10 +214,9 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 		pCtx.ExecutionResults = executionResults
 
 		// Determine next state based on configuration
-		config := components.Config.(interface{ IsRetrievalEnabled() bool })
 		retriever := components.Retriever
 
-		if config.IsRetrievalEnabled() && retriever != nil {
+		if components.Config.EnableRetrieval && retriever != nil {
 			return StateRetrieval, nil
 		}
 
@@ -378,12 +366,12 @@ func createSynthesisTransition(components DragonScaleComponents) StateTransition
 }
 
 // createErrorTransition handles error states.
-func createErrorTransition(components DragonScaleComponents) StateTransition {
+func createErrorTransition(_ DragonScaleComponents) StateTransition {
 	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
 		// At this point, the error is already recorded in the process context
 		// We just need to decide what to do next
 
-		// TOD: In a more sophisticated implementation, we might:
+		// In a more sophisticated implementation, we might:
 		// 1. Check for retry conditions
 		// 2. Try alternative paths
 		// 3. Fall back to a simpler processing method
@@ -395,7 +383,7 @@ func createErrorTransition(components DragonScaleComponents) StateTransition {
 }
 
 // createCompleteTransition handles the complete state.
-func createCompleteTransition(components DragonScaleComponents) StateTransition {
+func createCompleteTransition(_ DragonScaleComponents) StateTransition {
 	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
 		// This is a terminal state - nothing to do
 		// The state machine's Execute method will handle returning the final result

@@ -36,6 +36,19 @@ type DragonScale struct {
 	asyncExecutionsMutex sync.RWMutex
 }
 
+// DragonScaleComponents holds references to the core components needed for state transitions.
+type DragonScaleComponents struct {
+	Planner    Planner
+	Executor   Executor
+	Retriever  Retriever
+	Solver     Solver
+	Tools      map[string]Tool
+	Config     Config
+	
+	// Function to retrieve tool schemas
+	GetSchemas func() map[string]string
+}
+
 // Config holds the configuration options for the DragonScale runtime.
 type Config struct {
 	// Maximum number of concurrent tool executions
@@ -236,12 +249,13 @@ func (d *DragonScale) createStateMachine() *statemachine.StateMachine {
 	}
 	
 	// Build components structure to pass to state machine
-	components := statemachine.DragonScaleComponents{
+	components := DragonScaleComponents{
 		Planner:   d.planner,
 		Executor:  d.executor,
 		Retriever: d.retriever,
 		Solver:    d.solver,
-		Tools:     make(map[string]interface{}),
+		Tools:     make(map[string]Tool),
+		// Pass the config to the state machine
 		Config:    d.config,
 		GetSchemas: func() map[string]string {
 			return d.GetToolSchemas()

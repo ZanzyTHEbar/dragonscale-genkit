@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/eventbus"
 	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/statemachine"
 )
 

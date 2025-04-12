@@ -44,6 +44,13 @@ const (
 	EventQueryProcessingProgress EventType = "query_processing_progress"
 	EventQueryProcessingSuccess  EventType = "query_processing_success"
 	EventQueryProcessingFailure  EventType = "query_processing_failure"
+	
+	// Async query processing events
+	EventQueryAsyncProcessingStarted    EventType = "query_async_processing_started"
+	EventQueryAsyncProcessingProgress   EventType = "query_async_processing_progress"
+	EventQueryAsyncProcessingSuccess    EventType = "query_async_processing_success"
+	EventQueryAsyncProcessingFailure    EventType = "query_async_processing_failure"
+	EventQueryAsyncProcessingCancelled  EventType = "query_async_processing_cancelled"
 
 	// System events
 	EventSystemError   EventType = "system_error"
