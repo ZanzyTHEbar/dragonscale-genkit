@@ -275,7 +275,7 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 		log.Printf("DAG execution finished successfully")
 	} else {
 		log.Printf("DAG execution finished with non-completed tasks")
-		// Decide if this constitutes an error
+		// TODO: Decide if this constitutes an error
 	}
 
 	return plan.Results, nil
