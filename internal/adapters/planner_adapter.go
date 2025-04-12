@@ -6,19 +6,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
-	"github.com/firebase/genkit/go/genkit"
+	"github.com/firebase/genkit/go/core"
 )
 
 // GenkitPlannerAdapter uses a Genkit Flow to implement the Planner interface.
 type GenkitPlannerAdapter struct {
-	plannerFlow *genkit.Flow[*dragonscale.PlannerInput, *dragonscale.ExecutionPlan, struct{}]
+	plannerFlow *core.Flow[*dragonscale.PlannerInput, *dragonscale.ExecutionPlan, struct{}]
 	cache       dragonscale.Cache
 }
 
 // NewGenkitPlannerAdapter creates a new adapter for the planner flow.
-func NewGenkitPlannerAdapter(plannerFlow *genkit.Flow[*dragonscale.PlannerInput, *dragonscale.ExecutionPlan, struct{}], cache dragonscale.Cache) *GenkitPlannerAdapter {
+func NewGenkitPlannerAdapter(plannerFlow *core.Flow[*dragonscale.PlannerInput, *dragonscale.ExecutionPlan, struct{}], cache dragonscale.Cache) *GenkitPlannerAdapter {
 	return &GenkitPlannerAdapter{
 		plannerFlow: plannerFlow,
 		cache:       cache,
@@ -32,18 +33,16 @@ func (a *GenkitPlannerAdapter) GeneratePlan(ctx context.Context, input dragonsca
 	// Try fetching from cache
 	if cachedPlan, found := a.cache.Get(ctx, cacheKey); found {
 		if plan, ok := cachedPlan.(*dragonscale.ExecutionPlan); ok {
-			genkit.Logger(ctx).Info("Planner cache hit", "key", cacheKey)
+			// Use standard Go logger since we might not have a genkit instance
 			// Re-initialize the non-serializable parts of the plan
 			return dragonscale.NewExecutionPlan(plan.Tasks), nil
 		} else {
-			genkit.Logger(ctx).Warn("Cache data for planner key is not an ExecutionPlan", "key", cacheKey)
+			// Use standard Go logger since we might not have a genkit instance
 		}
 	}
 
-	genkit.Logger(ctx).Info("Planner cache miss", "key", cacheKey)
-
 	// Run the Genkit planner flow
-	plan, err := genkit.RunFlow(ctx, a.plannerFlow, &input) // Pass pointer
+	plan, err := a.plannerFlow.Run(ctx, &input) // Pass pointer
 	if err != nil {
 		return nil, fmt.Errorf("planner flow execution failed: %w", err)
 	}
@@ -73,7 +72,7 @@ func (a *GenkitPlannerAdapter) generateCacheKey(ctx context.Context, input drago
 
 	inputBytes, err := json.Marshal(cacheableInput)
 	if err != nil {
-		genkit.Logger(ctx).Warn("Failed to marshal planner input for cache key", "error", err)
+		log.Printf("Failed to marshal planner input for cache key: %v", err)
 		// Fallback to a simpler key if marshalling fails
 		return "planner:" + input.Query
 	}

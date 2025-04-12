@@ -2,10 +2,9 @@ package cache
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
-
-	"github.com/firebase/genkit/go/genkit"
 )
 
 // InMemoryCache provides a simple thread-safe in-memory cache.
@@ -45,7 +44,7 @@ func (c *InMemoryCache) Get(ctx context.Context, key string) (interface{}, bool)
 		// Item expired (lazy cleanup)
 		// We could delete it here, but need write lock. For now, just report not found.
 		// Potential enhancement: trigger cleanup or delete under RUnlock/Lock sequence.
-		genkit.Logger(ctx).Debug("Cache item expired", "key", key)
+		log.Printf("Cache item expired: %s", key)
 		return nil, false
 	}
 
@@ -62,7 +61,7 @@ func (c *InMemoryCache) Set(ctx context.Context, key string, value interface{}) 
 		value:      value,
 		expiration: expiration,
 	}
-	genkit.Logger(ctx).Debug("Cache item set", "key", key)
+	log.Printf("Cache item set: %s", key)
 }
 
 // cleanupLoop periodically removes expired items (optional).

@@ -12,8 +12,22 @@ type Tool interface {
 	// Execute performs the tool's action.
 	// input contains resolved arguments based on the task definition and dependencies.
 	Execute(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error)
+
 	// Schema returns a description or definition of the tool, used by the Planner.
+	// Standard keys should include:
+	// - "description": string description of what the tool does
+	// - "parameters": map of parameter names to their descriptions
+	// - "returns": description of the tool's return value
+	// - "examples": optional list of usage examples
+	// - "category": optional category for grouping related tools
 	Schema() map[string]interface{}
+
+	// Validate checks if the provided input is valid for this tool.
+	// Returns nil if valid, error otherwise.
+	Validate(input map[string]interface{}) error
+
+	// Name returns the tool's name.
+	Name() string
 }
 
 // Retriever fetches additional context relevant to the query or plan.

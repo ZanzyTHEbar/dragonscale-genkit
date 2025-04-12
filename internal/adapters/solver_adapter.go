@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/firebase/genkit/go/genkit"
+	"github.com/firebase/genkit/go/core"
 )
 
 // SolverInput is the expected input structure for the solver flow.
@@ -16,11 +16,11 @@ type SolverInput struct {
 
 // GenkitSolverAdapter uses a Genkit Flow to implement the Solver interface.
 type GenkitSolverAdapter struct {
-	solverFlow *genkit.Flow[SolverInput, string, struct{}]
+	solverFlow *core.Flow[*SolverInput, string, struct{}]
 }
 
 // NewGenkitSolverAdapter creates a new adapter for the solver flow.
-func NewGenkitSolverAdapter(flow *genkit.Flow[SolverInput, string, struct{}]) *GenkitSolverAdapter {
+func NewGenkitSolverAdapter(flow *core.Flow[*SolverInput, string, struct{}]) *GenkitSolverAdapter {
 	return &GenkitSolverAdapter{solverFlow: flow}
 }
 
@@ -36,7 +36,7 @@ func (a *GenkitSolverAdapter) Synthesize(ctx context.Context, query string, exec
 		RetrievedContext: retrievedContext,
 	}
 
-	finalAnswer, err := genkit.RunFlow(ctx, a.solverFlow, &input)
+	finalAnswer, err := a.solverFlow.Run(ctx, &input)
 	if err != nil {
 		return "", fmt.Errorf("solver flow execution failed: %w", err)
 	}

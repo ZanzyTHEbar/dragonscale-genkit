@@ -6,7 +6,46 @@ import (
 	"log"
 	"math/rand"
 	"time"
+
+	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/adapters"
+	"github.com/ZanzyTHEbar/dragonscale-genkit/pkg/dragonscale"
 )
+
+// SetupTools creates and returns a map of all available tools.
+func SetupTools() map[string]dragonscale.Tool {
+	return map[string]dragonscale.Tool{
+		"search": adapters.NewGoToolAdapter(
+			"search",
+			PerformSearch,
+			adapters.WithDescription("Performs a web search for a given query."),
+			adapters.WithCategory("Web"),
+			adapters.WithParameters(map[string]string{
+				"arg0": "Search query string",
+			}),
+			adapters.WithReturns("Search results as a string."),
+			adapters.WithExamples([]string{
+				"search \"golang concurrency patterns\"",
+				"search \"weather in New York\"",
+			}),
+			adapters.WithValidator(validateSearchInput),
+		),
+		"calculate": adapters.NewGoToolAdapter(
+			"calculate",
+			PerformCalculation,
+			adapters.WithDescription("Calculates a mathematical expression."),
+			adapters.WithCategory("Math"),
+			adapters.WithParameters(map[string]string{
+				"arg0": "Mathematical expression to evaluate (e.g., '5*9')",
+			}),
+			adapters.WithReturns("Calculation result as a float."),
+			adapters.WithExamples([]string{
+				"calculate \"5*9\"",
+				"calculate \"1+1\"",
+			}),
+			adapters.WithValidator(validateCalculationInput),
+		),
+	}
+}
 
 // PerformSearch simulates a web search.
 // It expects an argument named "arg0" containing the query string.
@@ -59,4 +98,54 @@ func PerformCalculation(ctx context.Context, input map[string]interface{}) (map[
 	output := make(map[string]interface{})
 	output["output"] = result
 	return output, nil
+}
+
+// Validator functions for tools
+
+// validateSearchInput validates the input for the search tool.
+func validateSearchInput(input map[string]interface{}) error {
+	query, ok := input["arg0"]
+	if !ok {
+		return fmt.Errorf("missing search query (expected at key 'arg0')")
+	}
+
+	queryStr, ok := query.(string)
+	if !ok {
+		return fmt.Errorf("search query must be a string, got %T", query)
+	}
+
+	if len(queryStr) == 0 {
+		return fmt.Errorf("search query cannot be empty")
+	}
+
+	if len(queryStr) > 1000 {
+		return fmt.Errorf("search query too long (max 1000 characters)")
+	}
+
+	return nil
+}
+
+// validateCalculationInput validates the input for the calculation tool.
+func validateCalculationInput(input map[string]interface{}) error {
+	expr, ok := input["arg0"]
+	if !ok {
+		return fmt.Errorf("missing expression (expected at key 'arg0')")
+	}
+
+	exprStr, ok := expr.(string)
+	if !ok {
+		return fmt.Errorf("expression must be a string, got %T", expr)
+	}
+
+	if len(exprStr) == 0 {
+		return fmt.Errorf("expression cannot be empty")
+	}
+
+	if len(exprStr) > 100 {
+		return fmt.Errorf("expression too long (max 100 characters)")
+	}
+
+	// Could add more sophisticated validation for valid expressions here
+
+	return nil
 }
