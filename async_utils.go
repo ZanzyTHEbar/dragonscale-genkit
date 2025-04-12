@@ -6,20 +6,19 @@ import (
 	"time"
 
 	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/eventbus"
-	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/statemachine"
 )
 
 // AsyncExecutionStatus represents the status information for an async execution.
 type AsyncExecutionStatus struct {
-	ExecutionID  string                    `json:"execution_id"`
-	Query        string                    `json:"query"`
-	CurrentState statemachine.ProcessState `json:"current_state"`
-	StartTime    time.Time                 `json:"start_time"`
-	Duration     time.Duration             `json:"duration"`
-	IsComplete   bool                      `json:"is_complete"`
-	HasError     bool                      `json:"has_error"`
-	ErrorMessage string                    `json:"error_message,omitempty"`
-	ErrorStage   string                    `json:"error_stage,omitempty"`
+	ExecutionID  string        `json:"execution_id"`
+	Query        string        `json:"query"`
+	CurrentState ProcessState  `json:"current_state"`
+	StartTime    time.Time     `json:"start_time"`
+	Duration     time.Duration `json:"duration"`
+	IsComplete   bool          `json:"is_complete"`
+	HasError     bool          `json:"has_error"`
+	ErrorMessage string        `json:"error_message,omitempty"`
+	ErrorStage   string        `json:"error_stage,omitempty"`
 }
 
 // GetAsyncStatus retrieves the current status of an async execution.
@@ -38,8 +37,8 @@ func (d *DragonScale) GetAsyncStatus(executionID string) (*AsyncExecutionStatus,
 		CurrentState: pCtx.CurrentState,
 		StartTime:    pCtx.StartTime,
 		Duration:     pCtx.GetTotalDuration(),
-		IsComplete:   pCtx.CurrentState == statemachine.StateComplete,
-		HasError:     pCtx.CurrentState == statemachine.StateError,
+		IsComplete:   pCtx.CurrentState == StateComplete,
+		HasError:     pCtx.CurrentState == StateError,
 	}
 
 	if pCtx.LastError != nil {
@@ -62,8 +61,8 @@ func (d *DragonScale) GetAsyncResult(executionID string) (string, error) {
 	}
 
 	// Check if execution is complete
-	if pCtx.CurrentState != statemachine.StateComplete {
-		if pCtx.CurrentState == statemachine.StateError {
+	if pCtx.CurrentState != StateComplete {
+		if pCtx.CurrentState == StateError {
 			return "", fmt.Errorf("execution failed: %v", pCtx.LastError)
 		}
 		return "", fmt.Errorf("execution is still in progress (current state: %s)", pCtx.CurrentState)
@@ -84,7 +83,7 @@ func (d *DragonScale) CancelAsyncProcess(executionID string) (bool, error) {
 	}
 
 	// Check if execution is already complete
-	if pCtx.CurrentState == statemachine.StateComplete || pCtx.CurrentState == statemachine.StateError {
+	if pCtx.CurrentState == StateComplete || pCtx.CurrentState == StateError {
 		return false, nil
 	}
 
@@ -93,7 +92,7 @@ func (d *DragonScale) CancelAsyncProcess(executionID string) (bool, error) {
 		cancelFn()
 
 		// Update state to cancelled
-		pCtx.CurrentState = statemachine.StateError
+		pCtx.CurrentState = StateError
 		pCtx.LastError = fmt.Errorf("execution cancelled by user")
 		pCtx.ErrorStage = "cancelled"
 
@@ -141,7 +140,7 @@ func (d *DragonScale) CleanupCompletedExecutions(olderThan time.Duration) int {
 
 	for id, pCtx := range d.asyncExecutions {
 		// Only cleanup completed or errored executions
-		if (pCtx.CurrentState == statemachine.StateComplete || pCtx.CurrentState == statemachine.StateError) &&
+		if (pCtx.CurrentState == StateComplete || pCtx.CurrentState == StateError) &&
 			now.Sub(pCtx.StateStartTimes[pCtx.CurrentState]) > olderThan {
 			delete(d.asyncExecutions, id)
 			count++

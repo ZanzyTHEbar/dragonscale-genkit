@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/eventbus"
-	"github.com/ZanzyTHEbar/dragonscale-genkit/internal/statemachine"
 	"github.com/firebase/genkit/go/genkit"
 	"github.com/google/uuid"
 )
@@ -32,7 +31,7 @@ type DragonScale struct {
 	config Config
 	
 	// Async processing
-	asyncExecutions     map[string]*statemachine.ProcessContext
+	asyncExecutions     map[string]*ProcessContext
 	asyncExecutionsMutex sync.RWMutex
 }
 
@@ -157,7 +156,7 @@ func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale
 	ds := &DragonScale{
 		config:           DefaultConfig(),
 		tools:            make(map[string]Tool),
-		asyncExecutions:  make(map[string]*statemachine.ProcessContext),
+		asyncExecutions:  make(map[string]*ProcessContext),
 	}
 
 	// Apply options
@@ -233,7 +232,7 @@ func (d *DragonScale) Process(ctx context.Context, query string) (string, error)
 	stateMachine := d.createStateMachine()
 	
 	// Create an initial process context with the query
-	processContext := statemachine.NewProcessContext(query)
+	processContext := NewProcessContext(query)
 	
 	// Execute the state machine until completion or error
 	return stateMachine.Execute(ctx, processContext)
@@ -241,7 +240,7 @@ func (d *DragonScale) Process(ctx context.Context, query string) (string, error)
 
 // createStateMachine builds a state machine with all necessary transitions
 // for the DragonScale processing workflow.
-func (d *DragonScale) createStateMachine() *statemachine.StateMachine {
+func (d *DragonScale) createStateMachine() *StateMachine {
 	// Determine if event bus should be used
 	var eventBus eventbus.EventBus
 	if d.config.EnableEventBus {
@@ -268,7 +267,7 @@ func (d *DragonScale) createStateMachine() *statemachine.StateMachine {
 	}
 	
 	// Create and return the state machine
-	return statemachine.CreateProcessStateMachine(components, eventBus)
+	return CreateProcessStateMachine(components, eventBus)
 }
 
 // ProcessAsync starts an asynchronous query execution.
@@ -281,7 +280,7 @@ func (d *DragonScale) ProcessAsync(ctx context.Context, query string) (string, e
 	stateMachine := d.createStateMachine()
 	
 	// Create an initial process context with the query
-	processContext := statemachine.NewProcessContext(query)
+	processContext := NewProcessContext(query)
 	
 	// Store the process context in our map
 	d.asyncExecutionsMutex.Lock()
