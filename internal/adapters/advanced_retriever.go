@@ -18,7 +18,8 @@ import (
 // - Graph retrieval
 // - Genkit Flow-based retrieval
 // - Hybrid retriever utilizing Matryoshka Retrieval strategy
-// - Combines
+// - Combines semantic and keyword-based retrieval
+// - Supports multiple vector stores through an interface
 
 
 type AdvancedRetriever struct {

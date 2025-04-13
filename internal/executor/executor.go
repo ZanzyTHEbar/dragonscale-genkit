@@ -436,7 +436,6 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 			finalErr,
 			retryAttempt)
 	} else {
-		// Simple validation - no need to use assert-lib for this case
 		if result == nil {
 			var errs errbuilder.ErrorMap
 			errs.Set("validation", "Tool execution result cannot be nil")
