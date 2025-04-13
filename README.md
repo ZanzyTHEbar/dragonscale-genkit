@@ -1,17 +1,17 @@
 # DragonScale Genkit
 
-> [!IMPORTANT]\
-> This project is in early development and may not be stable.\
-> Please use it at your own risk.\
-
-> [!NOTE]\
-> This project is not affiliated with or endorsed by Google, Firebase, or any other third-party services.\
-
-DragonScale is a modular, extensible workflow automation framework powered by AI. It provides a structured approach to building AI-powered applications that can plan, execute, and solve complex tasks using tools and context retrieval.
-
 [![Go Reference](https://pkg.go.dev/badge/github.com/ZanzyTHEbar/dragonscale-genkit.svg)](https://pkg.go.dev/github.com/ZanzyTHEbar/dragonscale-genkit)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ZanzyTHEbar/dragonscale-genkit)](https://goreportcard.com/report/github.com/ZanzyTHEbar/dragonscale-genkit)
 [![License](https://img.shields.io/github/license/ZanzyTHEbar/dragonscale-genkit)](https://github.com/ZanzyTHEbar/dragonscale-genkit/blob/main/LICENSE)
+
+> [!IMPORTANT]\
+> This project is in early development and may not be stable.
+> Please use it at your own risk.
+
+> [!NOTE]\
+> This project is not affiliated with or endorsed by Google, Firebase, or any other third-party services.
+
+DragonScale is a modular, extensible workflow automation framework powered by AI. It provides a structured approach to building AI-powered applications that can plan, execute, and solve complex tasks using tools and context retrieval.
 
 ## Overview
 
