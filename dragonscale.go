@@ -287,27 +287,31 @@ func (d *DragonScale) createStateMachine() *StateMachine {
 
 // ProcessAsync starts an asynchronous query execution.
 // It returns a unique execution ID that can be used to check the status or get the result.
+// The provided context's cancellation signal will be propagated to the async execution.
 func (d *DragonScale) ProcessAsync(ctx context.Context, query string) (string, error) {
 	// Generate a unique execution ID
 	executionID := uuid.New().String()
-	
+
 	// Create a state machine for processing
 	stateMachine := d.createStateMachine()
-	
+
 	// Create an initial process context with the query
 	processContext := NewProcessContext(query)
-	
+
 	// Store the process context in our map
 	d.asyncExecutionsMutex.Lock()
 	d.asyncExecutions[executionID] = processContext
 	d.asyncExecutionsMutex.Unlock()
-	
-	// Create a new background context with cancellation for this async operation
-	asyncCtx, cancel := context.WithCancel(context.Background())
-	
-	// Store the cancel function in the state data for potential cancellation
+
+	// Create a new background context derived from the parent context (ctx)
+	// This ensures cancellation of the parent context propagates down.
+	asyncCtx, cancel := context.WithCancel(ctx) // Changed from context.Background()
+
+	// Store the cancel function in the state data for potential explicit cancellation via API later
 	processContext.StateData["cancel"] = cancel
-	
+	// Store execution ID for logging/debugging within transitions/state machine
+	processContext.StateData["execution_id"] = executionID
+
 	// Check if event bus is available
 	if d.config.EnableEventBus && d.eventBus != nil {
 		// Publish event for async processing started
@@ -320,60 +324,75 @@ func (d *DragonScale) ProcessAsync(ctx context.Context, query string) (string, e
 				"execution_id": executionID,
 			},
 		)
+		// Use the original context (ctx) for publishing the initial event
 		d.eventBus.Publish(ctx, startEvent)
 	}
-	
-	// Start a goroutine to execute the state machine
+
+	// Start a goroutine to execute the state machine using the derived context (asyncCtx)
 	go func() {
 		defer cancel() // Ensure context is cancelled when goroutine exits
-		
-		// Execute the state machine
+
+		// Execute the state machine with the derived context
 		result, err := stateMachine.Execute(asyncCtx, processContext)
-		
+
 		// Update the process context with the final result
 		d.asyncExecutionsMutex.Lock()
 		if pCtx, exists := d.asyncExecutions[executionID]; exists {
 			pCtx.FinalAnswer = result
 			if err != nil {
-				// Use SetError which now correctly handles DragonScaleError
-				pCtx.SetError(err, string(pCtx.CurrentState)) // Pass the state where Execute returned
+				currentStage := string(pCtx.CurrentState) // Get stage before potentially changing it
+				// Check if the error was due to context cancellation
+				if err == context.Canceled || err == context.DeadlineExceeded {
+					pCtx.SetCancelled(err, currentStage) // Use SetCancelled method
+				} else {
+					// If the state machine didn't already set the error state,
+					// set it here. The state machine Execute should handle this,
+					// but this is a safeguard.
+					if !pCtx.IsTerminal() {
+						pCtx.SetError(err, currentStage)
+					}
+				}
 			} else {
-				pCtx.Complete()
+				// Only mark as complete if no error occurred and not already terminal
+				if !pCtx.IsTerminal() {
+					pCtx.Complete()
+				}
 			}
 		}
 		d.asyncExecutionsMutex.Unlock()
-		
+
 		// Publish completion event if event bus is available
 		if d.config.EnableEventBus && d.eventBus != nil {
 			eventType := eventbus.EventQueryAsyncProcessingSuccess
 			metadata := map[string]interface{}{
 				"execution_id": executionID,
-				"duration_ms":  processContext.GetTotalDuration().Milliseconds(),
+				"duration_ms":  processContext.GetTotalDuration().Milliseconds(), // Use processContext directly
 			}
-			
+
 			if err != nil {
 				eventType = eventbus.EventQueryAsyncProcessingFailure
-				metadata["error"] = err.Error() // Keep full error string for event
-				// Add code and stage if it's a DragonScaleError
-				if dsErr, ok := err.(*DragonScaleError); ok {
-					metadata["error_code"] = dsErr.Code
-					metadata["error_stage"] = dsErr.Stage
-				} else {
-					metadata["error_stage"] = string(processContext.CurrentState) // Fallback stage
+				metadata["error"] = err.Error()
+				metadata["error_stage"] = processContext.ErrorStage // Use processContext directly
+				// Add context cancellation info if applicable
+				if err == context.Canceled {
+					metadata["reason"] = "Context Canceled"
+				} else if err == context.DeadlineExceeded {
+					metadata["reason"] = "Context Deadline Exceeded"
 				}
 			}
-			
+
 			completionEvent := eventbus.NewEvent(
 				eventType,
 				query,
 				"DragonScale.ProcessAsync",
 				metadata,
 			)
-			// Use background context since original context might be done
+			// Use background context for publishing completion event,
+			// as the original context might be done.
 			d.eventBus.Publish(context.Background(), completionEvent)
 		}
 	}()
-	
+
 	return executionID, nil
 }
 

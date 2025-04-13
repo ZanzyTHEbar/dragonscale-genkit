@@ -33,6 +33,10 @@ const (
 	StateError ProcessState = "error"
 	// StateComplete represents the completed state
 	StateComplete ProcessState = "complete"
+	// StateCancelled represents the cancelled state
+	StateCancelled ProcessState = "cancelled"
+	// StateUnknown is used when the status of an async execution cannot be determined.
+	StateUnknown ProcessState = "unknown" // Added StateUnknown
 )
 
 // ProcessContext contains the data needed for process execution.
@@ -95,12 +99,25 @@ func (pc *ProcessContext) PopState() bool {
 	return true
 }
 
-// SetError sets the last error and error stage.
+// IsTerminal checks if the current state is a terminal state (Complete, Error, Cancelled).
+func (pc *ProcessContext) IsTerminal() bool {
+	return pc.CurrentState == StateComplete || pc.CurrentState == StateError || pc.CurrentState == StateCancelled
+}
+
+// SetError sets the last error and error stage, transitioning to StateError.
 func (pc *ProcessContext) SetError(err error, stage string) {
 	pc.LastError = err
 	pc.ErrorStage = stage
 	pc.CurrentState = StateError
 	pc.StateStartTimes[StateError] = time.Now()
+}
+
+// SetCancelled sets the state to Cancelled and records the cancellation error.
+func (pc *ProcessContext) SetCancelled(err error, stage string) {
+	pc.LastError = err
+	pc.ErrorStage = stage // Record the stage where cancellation was detected
+	pc.CurrentState = StateCancelled
+	pc.StateStartTimes[StateCancelled] = time.Now()
 }
 
 // Complete marks the process as complete and sets the end time.
@@ -113,7 +130,7 @@ func (pc *ProcessContext) Complete() {
 // GetStateDuration returns the duration spent in the given state.
 func (pc *ProcessContext) GetStateDuration(state ProcessState) time.Duration {
 	startTime, ok := pc.StateStartTimes[state]
-	if !ok {
+	if (!ok) {
 		return 0
 	}
 
@@ -158,31 +175,63 @@ func (sm *StateMachine) RegisterTransition(state ProcessState, transition StateT
 
 // Execute runs the state machine until completion or error.
 func (sm *StateMachine) Execute(ctx context.Context, pCtx *ProcessContext) (string, error) {
-	for {
-		transition, ok := sm.transitions[pCtx.CurrentState]
-		if !ok {
-			return "", fmt.Errorf("no transition registered for state %s", pCtx.CurrentState)
+	for !pCtx.IsTerminal() { // Use the new IsTerminal method
+		// Check for context cancellation before executing the next state
+		select {
+		case <-ctx.Done():
+			// Context was cancelled
+			err := ctx.Err()
+			currentStage := string(pCtx.CurrentState)
+			pCtx.SetCancelled(err, currentStage) // Use SetCancelled method
+			return "", err // Return the cancellation error
+		default:
+			// Context is still active, proceed
 		}
 
+		transition, exists := sm.transitions[pCtx.CurrentState]
+		if !exists {
+			err := fmt.Errorf("no transition defined for state: %s", pCtx.CurrentState)
+			currentStage := string(pCtx.CurrentState)
+			pCtx.SetError(err, currentStage) // Use SetError
+			return "", err
+		}
+
+		// Execute the transition function for the current state
 		nextState, err := transition(ctx, sm.eventBus, pCtx)
+
 		if err != nil {
-			// Error already recorded in the process context
-			if pCtx.CurrentState == StateError {
-				return "", pCtx.LastError
+			currentStage := string(pCtx.CurrentState)
+			// Check if the error is due to context cancellation (might be caught within the transition)
+			if err == context.Canceled || err == context.DeadlineExceeded {
+				pCtx.SetCancelled(err, currentStage) // Use SetCancelled
+			} else {
+				// SetError is usually called within the transition for specific errors,
+				// but if a transition returns a non-cancellation error without setting state,
+				// we set it here.
+				if !pCtx.IsTerminal() { // Avoid overwriting if already set to Error/Cancelled
+					pCtx.SetError(err, currentStage)
+				}
 			}
-
-			pCtx.SetError(err, string(pCtx.CurrentState))
-			continue
+			// The loop will continue and check IsTerminal() again
+			continue // Go to the top of the loop to check terminal state
 		}
 
-		// State transition
-		pCtx.CurrentState = nextState
-		pCtx.StateStartTimes[nextState] = time.Now()
-
-		// Check for completion
-		if nextState == StateComplete {
-			pCtx.Complete()
-			return pCtx.FinalAnswer, nil
+		// Update the current state if it wasn't changed by SetError/SetCancelled
+		if !pCtx.IsTerminal() {
+			pCtx.CurrentState = nextState
+			pCtx.StateStartTimes[nextState] = time.Now()
 		}
+	}
+
+	// Return the final answer and any error encountered (including cancellation)
+	return pCtx.FinalAnswer, pCtx.LastError
+}
+
+// createCancelledTransition handles the cancelled state.
+func createCancelledTransition(_ DragonScaleComponents) StateTransition {
+	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
+		// This is a terminal state. The error (context.Canceled or DeadlineExceeded)
+		// should already be set in pCtx.LastError by the Execute loop or a transition.
+		return StateCancelled, pCtx.LastError // Remain in Cancelled state, return the cancellation error
 	}
 }
