@@ -361,7 +361,7 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 	// Get the tool from the registry
 	tool, exists := e.toolRegistry[task.ToolName]
 	if !exists {
-		err := fmt.Errorf("tool '%s' not found in registry", task.ToolName)
+		err := dragonscale.NewToolNotFoundError("execution", task.ToolName)
 		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
 		task.SetErrorContext("Tool not found in registry")
 		return
@@ -370,7 +370,7 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 	// Resolve arguments using the new structured approach
 	resolvedArgs, err := e.resolveArguments(ctx, task, plan)
 	if err != nil {
-		err := fmt.Errorf("argument resolution failed for task %s: %w", task.ID, err)
+		err := dragonscale.NewArgResolutionError("execution", task.ID, "", err)
 		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
 		task.SetErrorContext("Argument resolution failed")
 		return
@@ -461,7 +461,7 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 			// finalStatus = dragonscale.TaskStatusCancelled
 		}
 
-		task.UpdateStatus(finalStatus, toolErr)
+		task.UpdateStatus(finalStatus, dragonscale.NewToolExecutionError("execution", task.ToolName, toolErr))
 		log.Printf("Task execution finished with error after %d attempts (task_id: %s, tool: %s, error: %v)",
 			retryAttempt, // Use retryAttempt which reflects the number of tries
 			task.ID,
@@ -470,7 +470,7 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 	} else {
 		// Validate result is not nil (optional, depends on tool contract)
 		if result == nil {
-			err := fmt.Errorf("tool execution returned a nil result map")
+			err := dragonscale.NewInternalError("execution", "tool execution returned a nil result map", nil)
 			task.UpdateStatus(dragonscale.TaskStatusFailed, err)
 			task.SetErrorContext("Tool returned nil result")
 			return
@@ -575,7 +575,7 @@ func (e *DAGExecutor) resolveArguments(ctx context.Context, task *dragonscale.Ta
 			plan.StateMutex.RUnlock()
 
 			if !exists {
-				return nil, fmt.Errorf("dependency task '%s' for argument '%s' not found in plan", depTaskID, argName)
+				return nil, dragonscale.NewArgResolutionError("execution", task.ID, argName, fmt.Errorf("dependency task '%s' for argument '%s' not found in plan", depTaskID, argName))
 			}
 
 			// Only completed tasks can provide valid results
@@ -583,34 +583,34 @@ func (e *DAGExecutor) resolveArguments(ctx context.Context, task *dragonscale.Ta
 				// Wait for the dependency to complete? No, the scheduler ensures this.
 				// If we are here, the dependency should have completed.
 				// This indicates a potential logic error in the scheduler or status updates.
-				return nil, fmt.Errorf(
+				return nil, dragonscale.NewInternalError("execution", fmt.Sprintf(
 					"internal error: dependency task '%s' for argument '%s' has status %s, expected %s",
 					depTaskID,
 					argName,
 					depTask.GetStatus(),
 					dragonscale.TaskStatusCompleted,
-				)
+				), nil)
 			}
 
 			// Fetch the full result map of the dependency task from the plan's results
 			depResultRaw, ok := plan.GetResult(depTaskID) // Use safe GetResult method
 			if !ok {
 				// If it completed but result wasn't found, that's an internal error
-				return nil, fmt.Errorf(
+				return nil, dragonscale.NewInternalError("execution", fmt.Sprintf(
 					"internal error: failed to find result map for completed task '%s' needed for argument '%s'",
 					depTaskID,
 					argName,
-				)
+				), nil)
 			}
 
 			// Assert that the result is a map[string]interface{}
 			depResultMap, ok := depResultRaw.(map[string]interface{})
 			if !ok {
-				return nil, fmt.Errorf(
+				return nil, dragonscale.NewInternalError("execution", fmt.Sprintf(
 					"result for dependency task '%s' is not of expected type map[string]interface{} (got %T)",
 					depTaskID,
 					depResultRaw,
-				)
+				), nil)
 			}
 
 			// Extract the specific field needed for the argument
@@ -620,19 +620,19 @@ func (e *DAGExecutor) resolveArguments(ctx context.Context, task *dragonscale.Ta
 				if outputFieldName == "" || outputFieldName == "*" { // Convention for whole map
 					resolved[argName] = depResultMap
 				} else {
-					return nil, fmt.Errorf(
+					return nil, dragonscale.NewArgResolutionError("execution", task.ID, argName, fmt.Errorf(
 						"output field '%s' not found in result map of dependency task '%s' for argument '%s'",
 						outputFieldName,
 						depTaskID,
 						argName,
-					)
+					))
 				}
 			} else {
 				resolved[argName] = value
 			}
 
 		default:
-			return nil, fmt.Errorf("unknown argument source type '%s' for argument '%s'", argSource.Type, argName)
+			return nil, dragonscale.NewArgResolutionError("execution", task.ID, argName, fmt.Errorf("unknown argument source type '%s' for argument '%s'", argSource.Type, argName))
 		}
 	}
 

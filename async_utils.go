@@ -63,9 +63,15 @@ func (d *DragonScale) GetAsyncResult(executionID string) (string, error) {
 	// Check if execution is complete
 	if pCtx.CurrentState != StateComplete {
 		if pCtx.CurrentState == StateError {
-			return "", fmt.Errorf("execution failed: %v", pCtx.LastError)
+			// Return the original error stored in the context
+			return "", fmt.Errorf("execution failed during stage '%s': %w", pCtx.ErrorStage, pCtx.LastError)
 		}
 		return "", fmt.Errorf("execution is still in progress (current state: %s)", pCtx.CurrentState)
+	}
+
+	// Check if there was an error even if the state somehow reached Complete (shouldn't happen with current logic, but good practice)
+	if pCtx.LastError != nil {
+		return "", fmt.Errorf("execution completed but encountered an error during stage '%s': %w", pCtx.ErrorStage, pCtx.LastError)
 	}
 
 	return pCtx.FinalAnswer, nil

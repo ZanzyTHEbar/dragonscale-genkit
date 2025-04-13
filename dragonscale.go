@@ -149,7 +149,8 @@ func WithTools(tools map[string]Tool) Option {
 // New creates a new DragonScale instance with the provided options.
 func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale, error) {
 	if g == nil {
-		return nil, fmt.Errorf("genkit instance is required")
+		// Use NewConfigurationError for validation failures during initialization
+		return nil, NewConfigurationError("genkit instance is required", nil)
 	}
 
 	// Create with default configuration
@@ -164,27 +165,12 @@ func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale
 		option(ds)
 	}
 
-	// Validate required components
-	if ds.planner == nil {
-		return nil, fmt.Errorf("planner is required")
+	// Validate the configuration
+	if err := ds.validateConfiguration(); err != nil {
+		// Wrap validation error using NewConfigurationError
+		return nil, NewConfigurationError("invalid configuration", err)
 	}
 
-	if ds.executor == nil {
-		return nil, fmt.Errorf("executor is required")
-	}
-
-	if ds.solver == nil {
-		return nil, fmt.Errorf("solver is required")
-	}
-
-	if ds.cache == nil {
-		return nil, fmt.Errorf("cache is required")
-	}
-
-	if len(ds.tools) == 0 {
-		return nil, fmt.Errorf("at least one tool is required")
-	}
-	
 	// Initialize event bus if enabled but not provided
 	if ds.config.EnableEventBus && ds.eventBus == nil {
 		// Create a default channel-based event bus
@@ -198,10 +184,44 @@ func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale
 	return ds, nil
 }
 
+// validateConfiguration checks if the essential components are configured.
+// Returns a DragonScaleError if validation fails.
+func (d *DragonScale) validateConfiguration() error { // Return type is now error
+	if d.planner == nil {
+		return NewError(ErrCodeConfiguration, "initialization", "planner is required", nil)
+	}
+	if d.executor == nil {
+		return NewError(ErrCodeConfiguration, "initialization", "executor is required", nil)
+	}
+	if d.solver == nil {
+		return NewError(ErrCodeConfiguration, "initialization", "solver is required", nil)
+	}
+	if d.cache == nil {
+		return NewError(ErrCodeConfiguration, "initialization", "cache is required", nil)
+	}
+	if len(d.tools) == 0 {
+		return NewError(ErrCodeConfiguration, "initialization", "at least one tool is required", nil)
+	}
+	if d.config.MaxConcurrentExecutions <= 0 {
+		return NewError(ErrCodeConfiguration, "initialization", "MaxConcurrentExecutions must be positive", nil)
+	}
+	if d.config.MaxRetries < 0 {
+		return NewError(ErrCodeConfiguration, "initialization", "MaxRetries cannot be negative", nil)
+	}
+	if d.config.RetryDelay < 0 {
+		return NewError(ErrCodeConfiguration, "initialization", "RetryDelay cannot be negative", nil)
+	}
+	if d.config.ExecutionTimeout <= 0 {
+		return NewError(ErrCodeConfiguration, "initialization", "ExecutionTimeout must be positive", nil)
+	}
+	return nil
+}
+
 // RegisterTool adds a new tool to the DragonScale runtime.
 func (d *DragonScale) RegisterTool(name string, tool Tool) error {
 	if _, exists := d.tools[name]; exists {
-		return fmt.Errorf("tool with name '%s' already exists", name)
+		// Use NewConfigurationError for registration issues
+		return NewConfigurationError(fmt.Sprintf("tool with name '%s' already exists", name), nil)
 	}
 
 	d.tools[name] = tool
@@ -315,7 +335,8 @@ func (d *DragonScale) ProcessAsync(ctx context.Context, query string) (string, e
 		if pCtx, exists := d.asyncExecutions[executionID]; exists {
 			pCtx.FinalAnswer = result
 			if err != nil {
-				pCtx.SetError(err, string(pCtx.CurrentState))
+				// Use SetError which now correctly handles DragonScaleError
+				pCtx.SetError(err, string(pCtx.CurrentState)) // Pass the state where Execute returned
 			} else {
 				pCtx.Complete()
 			}
@@ -332,8 +353,14 @@ func (d *DragonScale) ProcessAsync(ctx context.Context, query string) (string, e
 			
 			if err != nil {
 				eventType = eventbus.EventQueryAsyncProcessingFailure
-				metadata["error"] = err.Error()
-				metadata["error_stage"] = processContext.ErrorStage
+				metadata["error"] = err.Error() // Keep full error string for event
+				// Add code and stage if it's a DragonScaleError
+				if dsErr, ok := err.(*DragonScaleError); ok {
+					metadata["error_code"] = dsErr.Code
+					metadata["error_stage"] = dsErr.Stage
+				} else {
+					metadata["error_stage"] = string(processContext.CurrentState) // Fallback stage
+				}
 			}
 			
 			completionEvent := eventbus.NewEvent(
@@ -355,7 +382,8 @@ func (d *DragonScale) GetToolByName(name string) (Tool, error) {
 	if tool, exists := d.tools[name]; exists {
 		return tool, nil
 	}
-	return nil, fmt.Errorf("tool with name '%s' not found", name)
+	// Use NewToolNotFoundError
+	return nil, NewToolNotFoundError("lookup", name)
 }
 
 // ListTools returns a list of all registered tool names.
