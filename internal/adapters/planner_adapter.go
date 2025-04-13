@@ -63,11 +63,11 @@ func (a *GenkitPlannerAdapter) generateCacheKey(ctx context.Context, input drago
 	// Create a stable representation of the input (e.g., JSON)
 	// Avoid including CurrentState and Reason in the cache key for initial planning
 	cacheableInput := struct {
-		Query      string            `json:"query"`
-		ToolSchema map[string]string `json:"tool_schema"`
+		Query      string                            `json:"query"`
+		ToolSchema map[string]map[string]interface{} `json:"tool_schema"` // Updated type
 	}{
 		Query:      input.Query,
-		ToolSchema: input.ToolSchema,
+		ToolSchema: input.ToolSchema, // Use the map[string]map[string]interface{} directly
 	}
 
 	inputBytes, err := json.Marshal(cacheableInput)
