@@ -45,7 +45,7 @@ type DragonScaleComponents struct {
 	Config     Config
 	
 	// Function to retrieve tool schemas
-	GetSchemas func() map[string]string
+	GetSchemas func() map[string]map[string]interface{} // Updated return type
 }
 
 // Config holds the configuration options for the DragonScale runtime.
@@ -208,25 +208,20 @@ func (d *DragonScale) RegisterTool(name string, tool Tool) error {
 	return nil
 }
 
-// GetToolSchemas returns a map of tool names to their descriptions,
+// GetToolSchemas returns a map of tool names to their full schemas,
 // suitable for use in planner prompts.
-func (d *DragonScale) GetToolSchemas() map[string]string {
-	schemas := make(map[string]string)
+func (d *DragonScale) GetToolSchemas() map[string]map[string]interface{} { // Updated return type
+	schemas := make(map[string]map[string]interface{}) // Updated type
 
 	for name, tool := range d.tools {
-		schema := tool.Schema()
-		if desc, ok := schema["description"].(string); ok {
-			schemas[name] = desc
-		} else {
-			schemas[name] = "No description available."
-		}
+		schemas[name] = tool.Schema() // Get the full schema map
 	}
 
 	return schemas
 }
 
 // Process handles an end-to-end query execution through the DragonScale runtime
-// using a pushdown automaton state machine approach.
+// using a pushdown automaton state machine approach (State Machine with a stack).
 func (d *DragonScale) Process(ctx context.Context, query string) (string, error) {
 	// Create a state machine for processing
 	stateMachine := d.createStateMachine()
@@ -256,8 +251,8 @@ func (d *DragonScale) createStateMachine() *StateMachine {
 		Tools:     make(map[string]Tool),
 		// Pass the config to the state machine
 		Config:    d.config,
-		GetSchemas: func() map[string]string {
-			return d.GetToolSchemas()
+		GetSchemas: func() map[string]map[string]interface{} { // Updated return type
+			return d.GetToolSchemas() // Call the updated method
 		},
 	}
 	

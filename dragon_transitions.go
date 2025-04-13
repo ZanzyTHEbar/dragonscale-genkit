@@ -62,28 +62,27 @@ func createPlanningTransition(components DragonScaleComponents) StateTransition 
 		hasEventBus := eb != nil
 		planner := components.Planner
 
-		// Cast the input to the expected type
-		plannerInput, ok := pCtx.PlannerInput.(map[string]interface{})
-		if !ok {
-			return StateError, fmt.Errorf("invalid planner input type")
+		// Prepare planner input using the defined struct
+		plannerInput := PlannerInput{
+			Query:      pCtx.Query,
+			ToolSchema: components.GetSchemas(), // Should now match PlannerInput.ToolSchema type
+			// CurrentState and Reason would be populated if replanning
 		}
+		pCtx.PlannerInput = plannerInput // Store the structured input
 
 		if hasEventBus {
 			// Publish planning started event
 			planStartEvent := eventbus.NewEvent(
 				eventbus.EventPlanGenerationStarted,
-				plannerInput,
+				plannerInput, // Use the structured input
 				"StateMachine.Planning",
 				nil,
 			)
 			eb.Publish(ctx, planStartEvent)
 		}
 
-		// Call the planner through reflection or type assertion
-		// TODO: This is a simplified example - the actual implementation would need to match your Planner interface
-		executionPlan, err := planner.(interface {
-			GeneratePlan(context.Context, interface{}) (interface{}, error)
-		}).GeneratePlan(ctx, plannerInput)
+		// Call the planner directly using the interface
+		executionPlan, err := planner.GeneratePlan(ctx, plannerInput)
 		if err != nil {
 			if hasEventBus {
 				// Publish failure events
@@ -111,17 +110,43 @@ func createPlanningTransition(components DragonScaleComponents) StateTransition 
 			return StateError, fmt.Errorf("failed to generate execution plan: %w", err)
 		}
 
+		// Validate the plan before proceeding
+		if executionPlan == nil {
+			err := fmt.Errorf("planner generated a nil execution plan")
+			if hasEventBus {
+				// Publish failure events
+				failEvent := eventbus.NewEvent(
+					eventbus.EventPlanGenerationFailure,
+					err.Error(),
+					"StateMachine.Planning",
+					map[string]interface{}{
+						"error": err.Error(),
+					},
+				)
+				eb.Publish(ctx, failEvent)
+				queryFailEvent := eventbus.NewEvent(
+					eventbus.EventQueryProcessingFailure,
+					pCtx.Query,
+					"StateMachine.Planning",
+					map[string]interface{}{
+						"error": err.Error(),
+						"stage": "plan_generation",
+					},
+				)
+				eb.Publish(ctx, queryFailEvent)
+			}
+			return StateError, err
+		}
+
+
 		if hasEventBus {
 			// Determine task count for metadata
-			var taskCount int
-			if plan, ok := executionPlan.(interface{ GetTaskCount() int }); ok {
-				taskCount = plan.GetTaskCount()
-			}
+			taskCount := len(executionPlan.Tasks) // Use the Tasks slice length directly
 
 			// Publish success event
 			planSuccessEvent := eventbus.NewEvent(
 				eventbus.EventPlanGenerationSuccess,
-				executionPlan,
+				executionPlan, // Pass the plan directly
 				"StateMachine.Planning",
 				map[string]interface{}{
 					"task_count": taskCount,
@@ -131,7 +156,7 @@ func createPlanningTransition(components DragonScaleComponents) StateTransition 
 		}
 
 		// Store execution plan
-		pCtx.ExecutionPlan = executionPlan
+		pCtx.ExecutionPlan = executionPlan // Store the *ExecutionPlan
 
 		// Move to execution state
 		return StateExecution, nil
@@ -144,15 +169,24 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 		hasEventBus := eb != nil
 		executor := components.Executor
 
-		// Get the execution plan
-		executionPlan := pCtx.ExecutionPlan
+		// Get the execution plan and assert its type
+		planInterface := pCtx.ExecutionPlan
+		if planInterface == nil {
+			return StateError, fmt.Errorf("execution plan is nil in execution state")
+		}
+		executionPlan, ok := planInterface.(*ExecutionPlan)
+		if !ok {
+			return StateError, fmt.Errorf("invalid type for execution plan in context: expected *ExecutionPlan, got %T", planInterface)
+		}
+		// Further validation: ensure the plan itself isn't nil after assertion
+		if executionPlan == nil {
+			return StateError, fmt.Errorf("execution plan asserted to *ExecutionPlan is nil")
+		}
+
 
 		if hasEventBus {
 			// Determine task count for metadata
-			var taskCount int
-			if plan, ok := executionPlan.(interface{ GetTaskCount() int }); ok {
-				taskCount = plan.GetTaskCount()
-			}
+			taskCount := len(executionPlan.Tasks) // Now use the asserted type
 
 			// Publish DAG execution started event
 			dagStartEvent := eventbus.NewEvent(
@@ -166,10 +200,8 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 			eb.Publish(ctx, dagStartEvent)
 		}
 
-		// Execute the plan
-		executionResults, err := executor.(interface {
-			ExecutePlan(context.Context, interface{}) (map[string]interface{}, error)
-		}).ExecutePlan(ctx, executionPlan)
+		// Execute the plan directly using the interface
+		executionResults, err := executor.ExecutePlan(ctx, executionPlan) // Pass the asserted type
 		if err != nil {
 			if hasEventBus {
 				// Publish failure events
@@ -229,7 +261,21 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 func createRetrievalTransition(components DragonScaleComponents) StateTransition {
 	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
 		hasEventBus := eb != nil
-		retriever := components.Retriever
+		retriever := components.Retriever // Assumes retriever is not nil because we checked in previous state
+
+		// Get the execution plan and assert its type (needed for retriever context)
+		var executionPlan *ExecutionPlan // Declare variable to hold asserted plan
+		if pCtx.ExecutionPlan != nil {
+			planInterface := pCtx.ExecutionPlan
+			var ok bool
+			executionPlan, ok = planInterface.(*ExecutionPlan)
+			if !ok {
+				// Log or handle the error, but maybe proceed without the plan?
+				log.Printf("Warning: Invalid type for execution plan in context during retrieval: expected *ExecutionPlan, got %T. Proceeding without plan context.", planInterface)
+				executionPlan = nil // Ensure it's nil if assertion fails
+			}
+		}
+
 
 		if hasEventBus {
 			// Publish retrieval started event
@@ -242,10 +288,8 @@ func createRetrievalTransition(components DragonScaleComponents) StateTransition
 			eb.Publish(ctx, retrievalStartEvent)
 		}
 
-		// Retrieve context
-		retrievedContext, err := retriever.(interface {
-			RetrieveContext(context.Context, string, interface{}) (string, error)
-		}).RetrieveContext(ctx, pCtx.Query, pCtx.ExecutionPlan)
+		// Retrieve context directly using the interface, passing the asserted plan (or nil)
+		retrievedContext, err := retriever.RetrieveContext(ctx, pCtx.Query, executionPlan)
 		if err != nil {
 			// Log error but don't fail the process
 			log.Printf("Context retrieval failed: %v", err)
@@ -303,10 +347,8 @@ func createSynthesisTransition(components DragonScaleComponents) StateTransition
 			eb.Publish(ctx, synthesisStartEvent)
 		}
 
-		// Synthesize final answer
-		finalAnswer, err := solver.(interface {
-			Synthesize(context.Context, string, map[string]interface{}, string) (string, error)
-		}).Synthesize(ctx, pCtx.Query, pCtx.ExecutionResults, pCtx.RetrievedContext)
+		// Synthesize final answer directly using the interface
+		finalAnswer, err := solver.Synthesize(ctx, pCtx.Query, pCtx.ExecutionResults, pCtx.RetrievedContext)
 		if err != nil {
 			if hasEventBus {
 				// Publish failure events

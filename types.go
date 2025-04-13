@@ -23,14 +23,32 @@ const (
 	TaskStatusCancelled TaskStatus = "cancelled"
 )
 
+// ArgumentSourceType defines the type of source for a task argument.
+type ArgumentSourceType string
+
+const (
+	// ArgumentSourceLiteral indicates the argument value is a literal string.
+	ArgumentSourceLiteral ArgumentSourceType = "literal"
+	// ArgumentSourceDependencyOutput indicates the argument value comes from the output of another task.
+	ArgumentSourceDependencyOutput ArgumentSourceType = "dependencyOutput"
+)
+
+// ArgumentSource defines where a task argument's value comes from.
+type ArgumentSource struct {
+	Type             ArgumentSourceType `json:"type"`
+	Value            string             `json:"value,omitempty"`            // Used for literal values
+	DependencyTaskID string             `json:"dependencyTaskId,omitempty"` // Task ID providing the output
+	OutputFieldName  string             `json:"outputFieldName,omitempty"`  // Key in the dependency's result map
+}
+
 // Task represents a single unit of work in the execution plan.
 type Task struct {
-	ID          string   `json:"id"`
-	Description string   `json:"description"`
-	ToolName    string   `json:"tool_name"`
-	Args        []string `json:"args"` // Arguments, potentially including placeholders like "$task1_output"
-	DependsOn   []string `json:"depends_on"`
-	Category    string   `json:"category,omitempty"` // Optional category for grouping/filtering tasks
+	ID          string                    `json:"id"`
+	Description string                    `json:"description"`
+	ToolName    string                    `json:"tool_name"`
+	Args        map[string]ArgumentSource `json:"args"` // Map argument name to its source
+	DependsOn   []string                  `json:"depends_on"`
+	Category    string                    `json:"category,omitempty"` // Optional category for grouping/filtering tasks
 
 	// Internal execution state (not serialized typically)
 	status        TaskStatus    `json:"-"`
@@ -50,16 +68,16 @@ type Task struct {
 type ExecutionPlan struct {
 	Tasks      []Task                 `json:"tasks"`
 	TaskMap    map[string]*Task       `json:"-"` // Populated for quick lookup during execution
-	Results    map[string]interface{} `json:"-"` // Stores results of completed tasks
+	Results    map[string]interface{} `json:"-"` // Stores *full* results map of completed tasks (keyed by task ID)
 	StateMutex sync.RWMutex           `json:"-"` // Protects TaskMap and Results during execution
 }
 
 // PlannerInput contains the information needed by the Planner to generate a plan.
 type PlannerInput struct {
-	Query        string            `json:"query"`
-	ToolSchema   map[string]string `json:"tool_schema"`             // Map tool name to description/schema
-	CurrentState *ExecutionPlan    `json:"current_state,omitempty"` // For replanning
-	Reason       string            `json:"reason,omitempty"`        // For replanning
+	Query        string                            `json:"query"`
+	ToolSchema   map[string]map[string]interface{} `json:"tool_schema"`             // Map tool name to its full schema map
+	CurrentState *ExecutionPlan                    `json:"current_state,omitempty"` // For replanning
+	Reason       string                            `json:"reason,omitempty"`        // For replanning
 }
 
 // NewExecutionPlan creates a new execution plan and initializes internal maps.

@@ -5,15 +5,12 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 
 	"container/heap"
 
 	"github.com/ZanzyTHEbar/dragonscale-genkit"
-	"github.com/ZanzyTHEbar/errbuilder-go"
 )
 
 // Define TaskNode for the priority queue
@@ -101,13 +98,14 @@ func WithRetryDelay(delay time.Duration) ExecutorOption {
 	}
 }
 
-// NewDAGExecutor creates a new executor with the given options.
-func NewDAGExecutor(toolRegistry map[string]dragonscale.Tool, maxWorkers int, options ...ExecutorOption) *DAGExecutor {
+// NewExecutor creates a new executor with default settings.
+// It requires the tool registry to be passed during initialization.
+func NewExecutor(toolRegistry map[string]dragonscale.Tool, options ...ExecutorOption) *DAGExecutor {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &DAGExecutor{
-		toolRegistry: toolRegistry,
-		maxWorkers:   maxWorkers,
+		toolRegistry: toolRegistry,      // Store the provided tool registry
+		maxWorkers:   5,               // Default max workers
 		maxRetries:   3,               // Default to 3 retries
 		retryDelay:   time.Second * 2, // Default 2-second delay
 		ctx:          ctx,
@@ -117,6 +115,14 @@ func NewDAGExecutor(toolRegistry map[string]dragonscale.Tool, maxWorkers int, op
 	// Apply options
 	for _, option := range options {
 		option(e)
+	}
+
+	// Validate that toolRegistry is not nil or empty
+	if e.toolRegistry == nil || len(e.toolRegistry) == 0 {
+		// Log a warning or handle as appropriate, depending on whether an empty registry is valid
+		log.Println("Warning: DAGExecutor initialized with an empty or nil tool registry.")
+		// Depending on requirements, you might return an error here:
+		// return nil, fmt.Errorf("tool registry cannot be nil or empty")
 	}
 
 	return e
@@ -163,9 +169,17 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 				execErr = execCtx.Err()
 			}
 			errMutex.Unlock()
-			break
+			break // Exit the outer loop
 		default:
 			// Continue execution
+		}
+
+		// Check if we should break due to cancellation detected above
+		errMutex.Lock()
+		isCancelled := execErr != nil
+		errMutex.Unlock()
+		if isCancelled {
+			break
 		}
 
 		// Launch tasks while workers are available and tasks are ready
@@ -179,63 +193,88 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 
 			activeWorkers++
 			wg.Add(1)
-			go e.executeTask(ctx, task, plan, &wg, completionChannel, &errMutex, &execErr)
+			// Pass the executor context (execCtx) to the task execution goroutine
+			go e.executeTask(execCtx, task, plan, &wg, completionChannel, &errMutex, &execErr)
 		}
 
-		// Wait for a task to complete if no more tasks can be launched immediately
-		if activeWorkers == e.maxWorkers || (priorityQueue.Len() == 0 && activeWorkers > 0) {
-			completedTask := <-completionChannel
-			activeWorkers--
+		// Wait for a task to complete if no more tasks can be launched immediately or if we need to check for errors
+		if activeWorkers == e.maxWorkers || (priorityQueue.Len() == 0 && activeWorkers > 0) || isCancelled {
+			select {
+			case completedTask := <-completionChannel:
+				activeWorkers--
 
-			if completedTask.GetStatus() == dragonscale.TaskStatusFailed {
-				// Handle potential replanning trigger here
-				log.Printf("Task failed, stopping DAG execution for now (task_id: %s, error: %v, error_context: %s)",
-					completedTask.ID,
-					completedTask.Error,
-					completedTask.ErrorContext)
+				if completedTask.GetStatus() == dragonscale.TaskStatusFailed {
+					log.Printf("Task failed (task_id: %s, error: %v, error_context: %s)",
+						completedTask.ID,
+						completedTask.Error,
+						completedTask.ErrorContext)
 
+					errMutex.Lock()
+					if execErr == nil { // Keep the first error
+						execErr = fmt.Errorf("task %s failed: %w", completedTask.ID, completedTask.Error)
+					}
+					errMutex.Unlock()
+
+					// Check if we should retry the task (only if the DAG hasn't been cancelled)
+					errMutex.Lock()
+					shouldRetry := execErr == nil && completedTask.RetryCount < e.maxRetries
+					errMutex.Unlock()
+
+					if shouldRetry {
+						log.Printf("Retrying failed task (task_id: %s, retry: %d, max_retries: %d)",
+							completedTask.ID,
+							completedTask.RetryCount+1,
+							e.maxRetries)
+
+						// Reset the task for retry
+						completedTask.Retry()
+						node := &TaskNode{
+							task:     completedTask,
+							priority: e.calculatePriority(completedTask, plan) - 5, // Higher priority for retries
+						}
+						heap.Push(&priorityQueue, node)
+						continue // Continue the loop to potentially launch the retry
+					} else if execErr != nil {
+						log.Printf("Not retrying task %s because DAG execution has failed or been cancelled.", completedTask.ID)
+					} else {
+						log.Printf("Task %s failed and reached max retries.", completedTask.ID)
+					}
+					// If not retrying, the error is already set, and the loop will eventually break.
+
+				} else if completedTask.GetStatus() == dragonscale.TaskStatusCompleted {
+					// Check for newly ready tasks upon successful completion (only if DAG is not cancelled)
+					errMutex.Lock()
+					if execErr == nil {
+						newlyReady := e.findNewlyReadyTasks(completedTask, plan)
+						for _, nextTask := range newlyReady {
+							if nextTask.GetStatus() == dragonscale.TaskStatusPending { // Ensure we only add pending tasks
+								node := &TaskNode{task: nextTask, priority: e.calculatePriority(nextTask, plan)}
+								heap.Push(&priorityQueue, node)
+								nextTask.UpdateStatus(dragonscale.TaskStatusReady, nil)
+							}
+						}
+					}
+					errMutex.Unlock()
+				}
+			// Handle other completion statuses if necessary (e.g., Cancelled)
+
+			case <-execCtx.Done():
+				// Context cancelled while waiting for a task to complete
+				log.Printf("DAG execution cancelled while waiting for task completion (reason: %v)", execCtx.Err())
 				errMutex.Lock()
-				if execErr == nil { // Keep the first error
-					execErr = fmt.Errorf("task %s failed: %w", completedTask.ID, completedTask.Error)
+				if execErr == nil {
+					execErr = execCtx.Err()
 				}
 				errMutex.Unlock()
-
-				// Check if we should retry the task
-				if completedTask.RetryCount < e.maxRetries {
-					log.Printf("Retrying failed task (task_id: %s, retry: %d, max_retries: %d)",
-						completedTask.ID,
-						completedTask.RetryCount+1,
-						e.maxRetries)
-
-					// Reset the task for retry
-					completedTask.Retry()
-					node := &TaskNode{
-						task:     completedTask,
-						priority: e.calculatePriority(completedTask, plan) - 5, // Higher priority for retries
-					}
-					heap.Push(&priorityQueue, node)
-					continue
-				}
-
-				//TODO: we could flag specific tasks for replanning or implement a circuit breaker pattern for frequent failures
-			}
-
-			// Check for newly ready tasks upon completion
-			newlyReady := e.findNewlyReadyTasks(completedTask, plan)
-			for _, nextTask := range newlyReady {
-				if nextTask.GetStatus() == dragonscale.TaskStatusPending { // Ensure we only add pending tasks
-					node := &TaskNode{task: nextTask, priority: e.calculatePriority(nextTask, plan)}
-					heap.Push(&priorityQueue, node)
-					nextTask.UpdateStatus(dragonscale.TaskStatusReady, nil)
-				}
+				break // Break the inner select
 			}
 		}
 
-		// If an error occurred, break the loop after draining current tasks
+		// Check again if we should break the outer loop due to error/cancellation
 		errMutex.Lock()
-		isError := execErr != nil
+		isErrorOrCancelled := execErr != nil
 		errMutex.Unlock()
-		if isError && activeWorkers == 0 { // Stop adding new tasks if an error occurred and wait for running ones to finish
+		if isErrorOrCancelled {
 			break
 		}
 	}
@@ -249,6 +288,13 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 
 	if finalError != nil {
 		log.Printf("DAG execution finished with error: %v", finalError)
+		// Ensure all remaining tasks are marked appropriately (e.g., cancelled)
+		for _, task := range plan.TaskMap {
+			if task.GetStatus() == dragonscale.TaskStatusPending || task.GetStatus() == dragonscale.TaskStatusReady || task.GetStatus() == dragonscale.TaskStatusRunning {
+				task.UpdateStatus(dragonscale.TaskStatusCancelled, finalError)
+				task.SetErrorContext("DAG execution failed or was cancelled")
+			}
+		}
 		return nil, finalError
 	}
 
@@ -256,7 +302,7 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 	for _, task := range plan.TaskMap {
 		if task.GetStatus() != dragonscale.TaskStatusCompleted {
 			allCompleted = false
-			log.Printf("DAG execution finished, but not all tasks completed (task_id: %s, status: %s, error: %v, retry_count: %d)",
+			log.Printf("DAG execution finished, but task did not complete successfully (task_id: %s, status: %s, error: %v, retry_count: %d)",
 				task.ID,
 				task.GetStatus(),
 				task.Error,
@@ -277,7 +323,8 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 		log.Printf("DAG execution finished successfully")
 	} else {
 		log.Printf("DAG execution finished with non-completed tasks")
-		// TODO: Decide if this constitutes an error
+		// Return an error if not all tasks completed successfully
+		return nil, fmt.Errorf("DAG execution finished, but not all tasks completed successfully")
 	}
 
 	return plan.Results, nil
@@ -288,14 +335,21 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 	defer func() {
 		// Update metrics before signaling completion
 		e.updateTaskMetrics(task)
-		completionChan <- task
+		// Non-blocking send to completion channel in case the main loop already exited
+		select {
+		case completionChan <- task:
+		default:
+			log.Printf("Warning: Could not send completion signal for task %s (channel likely closed or full)", task.ID)
+		}
 	}() // Signal completion regardless of outcome
 
-	// Check for cancellation using errbuilder
-	if err := errbuilder.WrapIfContextDone(ctx, nil); err != nil {
-		task.UpdateStatus(dragonscale.TaskStatusCancelled, err)
-		task.SetErrorContext("Task cancelled due to context cancellation")
+	// Check for cancellation at the start
+	select {
+	case <-ctx.Done():
+		task.UpdateStatus(dragonscale.TaskStatusCancelled, ctx.Err())
+		task.SetErrorContext("Task cancelled before execution started")
 		return
+	default:
 	}
 
 	task.UpdateStatus(dragonscale.TaskStatusRunning, nil)
@@ -307,32 +361,16 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 	// Get the tool from the registry
 	tool, exists := e.toolRegistry[task.ToolName]
 	if !exists {
-		var errs errbuilder.ErrorMap
-		errs.Set("tool", task.ToolName)
-		errs.Set("task_id", task.ID)
-		err := errbuilder.NotFoundErr(errbuilder.NewErrDetails(errs).Errors)
+		err := fmt.Errorf("tool '%s' not found in registry", task.ToolName)
 		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
 		task.SetErrorContext("Tool not found in registry")
 		return
 	}
-	
-	// Simple validation - no need to use assert-lib for this case
-	if tool == nil {
-		var errs errbuilder.ErrorMap
-		errs.Set("validation", "Tool must not be nil")
-		err := errbuilder.ValidationErr(errbuilder.NewErrDetails(errs).Errors)
-		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
-		task.SetErrorContext("Tool validation failed")
-		return
-	}
 
-	// Resolve arguments
-	resolvedArgs, err := e.resolveArguments(ctx, task.Args, plan)
+	// Resolve arguments using the new structured approach
+	resolvedArgs, err := e.resolveArguments(ctx, task, plan)
 	if err != nil {
-		var errs errbuilder.ErrorMap
-		errs.Set("task_id", task.ID)
-		errs.Set("cause", err.Error())
-		err := errbuilder.GenericErr("argument resolution failed", err)
+		err := fmt.Errorf("argument resolution failed for task %s: %w", task.ID, err)
 		task.UpdateStatus(dragonscale.TaskStatusFailed, err)
 		task.SetErrorContext("Argument resolution failed")
 		return
@@ -340,63 +378,53 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 
 	// Execute the tool with retry logic
 	var result map[string]interface{}
-	retryAttempt := 0
-	maxRetries := e.maxRetries
+	var toolErr error
+	retryAttempt := task.RetryCount // Start from current retry count
 
-	// If this is already a retry (from a previous failure), account for that
-	if task.RetryCount > 0 {
-		retryAttempt = task.RetryCount
-		maxRetries = e.maxRetries + task.RetryCount // Adjust max retries based on previous attempts
-	}
+	for retryAttempt <= e.maxRetries {
+		// Check for cancellation before each attempt
+		select {
+		case <-ctx.Done():
+			toolErr = ctx.Err() // Use context error
+			task.SetErrorContext("Context cancelled during execution/retry wait")
+			break // Exit retry loop
+		default:
+		}
+		if toolErr != nil { // Break if cancelled
+			break
+		}
 
-	for retryAttempt <= maxRetries {
 		// Execute the tool with timeout
-		var execErr error
-		execTimeout := time.Minute * 5 // Default timeout - could be made configurable
-
-		// Create a timeout context for the execution
+		execTimeout := time.Minute * 5 // TODO: Make this configurable via DragonScale Config
 		execCtx, cancel := context.WithTimeout(ctx, execTimeout)
-		defer cancel()
 
 		// Execute the tool directly
-		result, err = tool.Execute(execCtx, resolvedArgs)
+		result, toolErr = tool.Execute(execCtx, resolvedArgs)
+		cancel() // Cancel the timeout context immediately after execution
 
-		if err == nil {
+		if toolErr == nil {
 			// Success! Break out of retry loop
 			break
 		}
 
-		// Handle based on error type
-		if ctx.Err() != nil {
-			// Parent context was cancelled, no point retrying
-			var errs errbuilder.ErrorMap
-			errs.Set("cause", err.Error())
-			errs.Set("context_error", ctx.Err().Error())
-			execErr = errbuilder.GenericErr("context cancelled", err)
-			task.SetErrorContext("Parent context cancelled during execution")
-			break
-		} else if execCtx.Err() != nil && execCtx.Err() == context.DeadlineExceeded {
+		// Handle error type
+		if execCtx.Err() == context.DeadlineExceeded {
 			// Execution timed out
-			var errs errbuilder.ErrorMap
-			errs.Set("task_id", task.ID)
-			errs.Set("tool", task.ToolName)
-			errs.Set("timeout", execTimeout.String())
-			errs.Set("cause", err.Error())
-			execErr = errbuilder.GenericErr("execution timeout", err)
-			task.SetErrorContext("Execution timed out")
+			task.SetErrorContext(fmt.Sprintf("Execution timed out after %v", execTimeout))
+			// Keep toolErr as the timeout error
+		} else if ctx.Err() != nil {
+			// Parent context was cancelled (this might be redundant with the check at the start of the loop)
+			task.SetErrorContext("Parent context cancelled during execution")
+			toolErr = ctx.Err() // Ensure we store the cancellation error
+			break // No point retrying if parent context is gone
 		} else {
-			// Other error
-			var errs errbuilder.ErrorMap
-			errs.Set("task_id", task.ID)
-			errs.Set("tool", task.ToolName)
-			errs.Set("cause", err.Error())
-			execErr = errbuilder.GenericErr("tool execution", err)
-			task.SetErrorContext(fmt.Sprintf("Execution failed: %v", err))
+			// Other execution error
+			task.SetErrorContext(fmt.Sprintf("Execution failed: %v", toolErr))
 		}
 
 		// Decide whether to retry
 		retryAttempt++
-		if retryAttempt > maxRetries {
+		if retryAttempt > e.maxRetries {
 			// No more retries
 			break
 		}
@@ -405,55 +433,56 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 		log.Printf("Task execution failed, retrying (task_id: %s, tool: %s, error: %v, retry: %d, max_retries: %d)",
 			task.ID,
 			task.ToolName,
-			execErr,
+			toolErr,
 			retryAttempt,
-			maxRetries)
+			e.maxRetries)
 
-		// Wait before retrying
+		// Wait before retrying, respecting context cancellation
 		select {
 		case <-ctx.Done():
-			// Parent context was cancelled while waiting to retry
-			execErr = ctx.Err()
+			toolErr = ctx.Err() // Parent context cancelled while waiting
 			task.SetErrorContext("Context cancelled while waiting to retry")
-			break
+			break // Exit retry loop
 		case <-time.After(e.retryDelay):
 			// Ready to retry
 		}
+		if toolErr != nil { // Break if cancelled during wait
+			break
+		}
 	}
 
-	if err != nil {
-		// Create a structured error with details about the failure
-		var errs errbuilder.ErrorMap
-		errs.Set("task_id", task.ID)
-		errs.Set("tool", task.ToolName)
-		errs.Set("retry_count", retryAttempt)
-		errs.Set("max_retries", maxRetries)
-		finalErr := errbuilder.GenericErr("task execution failed after retries", err)
-		task.UpdateStatus(dragonscale.TaskStatusFailed, finalErr)
-		log.Printf("Task execution failed after retries (task_id: %s, tool: %s, error: %v, retries: %d)",
+	// Final status update based on toolErr
+	if toolErr != nil {
+		// Determine final status (Failed or Cancelled)
+		finalStatus := dragonscale.TaskStatusFailed
+		if toolErr == context.Canceled || toolErr == context.DeadlineExceeded {
+			// If the error is due to cancellation or timeout, mark as Cancelled?
+			// Or keep as Failed but use ErrorContext? Let's keep Failed for now.
+			// finalStatus = dragonscale.TaskStatusCancelled
+		}
+
+		task.UpdateStatus(finalStatus, toolErr)
+		log.Printf("Task execution finished with error after %d attempts (task_id: %s, tool: %s, error: %v)",
+			retryAttempt, // Use retryAttempt which reflects the number of tries
 			task.ID,
 			task.ToolName,
-			finalErr,
-			retryAttempt)
+			toolErr)
 	} else {
+		// Validate result is not nil (optional, depends on tool contract)
 		if result == nil {
-			var errs errbuilder.ErrorMap
-			errs.Set("validation", "Tool execution result cannot be nil")
-			err := errbuilder.ValidationErr(errbuilder.NewErrDetails(errs).Errors)
+			err := fmt.Errorf("tool execution returned a nil result map")
 			task.UpdateStatus(dragonscale.TaskStatusFailed, err)
-			task.SetErrorContext("Result validation failed")
+			task.SetErrorContext("Tool returned nil result")
 			return
 		}
-		
-		// Store result(s) - assuming a standard output key for simplicity, might need refinement
-		outputResult := result["output"] // Adjust based on actual Tool output structure
-		task.Result = outputResult
-		plan.SetResult(task.ID+"_output", outputResult) // Store result with a specific key convention
+
+		// Store the *entire* result map in the plan, keyed by the task ID.
+		task.Result = result // Store the full result on the task itself for potential direct access/debugging
+		plan.SetResult(task.ID, result) // Store the full result map in the plan's shared results
 		task.UpdateStatus(dragonscale.TaskStatusCompleted, nil)
-		log.Printf("Task execution completed (task_id: %s, tool: %s, result: %v, duration: %v)",
+		log.Printf("Task execution completed successfully (task_id: %s, tool: %s, duration: %v)",
 			task.ID,
 			task.ToolName,
-			outputResult,
 			task.Duration())
 	}
 }
@@ -461,13 +490,16 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 // findReadyTasks identifies tasks whose dependencies are met.
 func (e *DAGExecutor) findReadyTasks(plan *dragonscale.ExecutionPlan) []*dragonscale.Task {
 	ready := []*dragonscale.Task{}
+	plan.StateMutex.RLock() // Lock for reading task statuses
+	defer plan.StateMutex.RUnlock()
+
 	for _, task := range plan.TaskMap {
 		if task.GetStatus() != dragonscale.TaskStatusPending {
 			continue
 		}
 		dependenciesMet := true
 		for _, depID := range task.DependsOn {
-			depTask, exists := plan.GetTask(depID)
+			depTask, exists := plan.TaskMap[depID] // Access TaskMap directly within lock
 			if !exists || depTask.GetStatus() != dragonscale.TaskStatusCompleted {
 				dependenciesMet = false
 				break
@@ -483,6 +515,9 @@ func (e *DAGExecutor) findReadyTasks(plan *dragonscale.ExecutionPlan) []*dragons
 // findNewlyReadyTasks finds tasks that become ready after a specific task completes.
 func (e *DAGExecutor) findNewlyReadyTasks(completedTask *dragonscale.Task, plan *dragonscale.ExecutionPlan) []*dragonscale.Task {
 	newlyReady := []*dragonscale.Task{}
+	plan.StateMutex.RLock() // Lock for reading task statuses
+	defer plan.StateMutex.RUnlock()
+
 	// Iterate through all tasks to find those dependent on the completed one
 	for _, task := range plan.TaskMap {
 		if task.GetStatus() != dragonscale.TaskStatusPending {
@@ -502,7 +537,7 @@ func (e *DAGExecutor) findNewlyReadyTasks(completedTask *dragonscale.Task, plan 
 		// Check if ALL dependencies for this task are now met
 		allDepsMet := true
 		for _, depID := range task.DependsOn {
-			depTask, exists := plan.GetTask(depID)
+			depTask, exists := plan.TaskMap[depID] // Access TaskMap directly within lock
 			if !exists || depTask.GetStatus() != dragonscale.TaskStatusCompleted {
 				allDepsMet = false
 				break
@@ -516,80 +551,88 @@ func (e *DAGExecutor) findNewlyReadyTasks(completedTask *dragonscale.Task, plan 
 	return newlyReady
 }
 
-// resolveArguments replaces placeholders like $taskID_output with actual results.
-func (e *DAGExecutor) resolveArguments(ctx context.Context, args []string, plan *dragonscale.ExecutionPlan) (map[string]interface{}, error) {
-	resolved := make(map[string]interface{}, len(args))
-	// Regex to find placeholders like $taskID_output or ${taskID_output}
-	placeholderRegex := regexp.MustCompile(`\$\{?(\w+)_output\}?`) // Matches $taskID_output or ${taskID_output}
+// resolveArguments resolves arguments based on the Task's Args map and dependency results.
+func (e *DAGExecutor) resolveArguments(ctx context.Context, task *dragonscale.Task, plan *dragonscale.ExecutionPlan) (map[string]interface{}, error) {
+	resolved := make(map[string]interface{}, len(task.Args))
 
-	for i, arg := range args {
-		matches := placeholderRegex.FindAllStringSubmatch(arg, -1)
+	for argName, argSource := range task.Args {
+		switch argSource.Type {
+		case dragonscale.ArgumentSourceLiteral:
+			// Use the literal value directly
+			// TODO: Consider type conversion if schema specifies a non-string type for the literal?
+			// For now, assume literals are passed as intended type (often string).
+			resolved[argName] = argSource.Value
 
-		// If no placeholders found, pass the argument as is
-		if len(matches) == 0 {
-			resolved[fmt.Sprintf("arg%d", i)] = arg
-			continue
-		}
+		case dragonscale.ArgumentSourceDependencyOutput:
+			// Fetch the result from the dependency task
+			depTaskID := argSource.DependencyTaskID
+			outputFieldName := argSource.OutputFieldName
 
-		replacedArg := arg
-		for _, match := range matches {
-			if len(match) < 2 {
-				continue // Should not happen with the regex
-			}
-			placeholder := match[0]
-			dependencyTaskID := match[1]
-			resultKey := dependencyTaskID + "_output" // Construct the key used in SetResult
+			// Fetch the dependent task to ensure it completed
+			// No need for GetTask method here, access TaskMap directly after locking
+			plan.StateMutex.RLock()
+			depTask, exists := plan.TaskMap[depTaskID]
+			plan.StateMutex.RUnlock()
 
-			// Fetch the dependent task to check its status
-			depTask, exists := plan.GetTask(dependencyTaskID)
 			if !exists {
-				return nil, fmt.Errorf("dependency task '%s' not found in plan", dependencyTaskID)
+				return nil, fmt.Errorf("dependency task '%s' for argument '%s' not found in plan", depTaskID, argName)
 			}
 
 			// Only completed tasks can provide valid results
 			if depTask.GetStatus() != dragonscale.TaskStatusCompleted {
+				// Wait for the dependency to complete? No, the scheduler ensures this.
+				// If we are here, the dependency should have completed.
+				// This indicates a potential logic error in the scheduler or status updates.
 				return nil, fmt.Errorf(
-					"dependency '%s' required for arg '%s' has not completed successfully (status: %s)",
-					dependencyTaskID,
-					arg,
-					depTask.GetStatus())
+					"internal error: dependency task '%s' for argument '%s' has status %s, expected %s",
+					depTaskID,
+					argName,
+					depTask.GetStatus(),
+					dragonscale.TaskStatusCompleted,
+				)
 			}
 
-			// Fetch the result from the plan's results map
-			value, ok := plan.GetResult(resultKey)
+			// Fetch the full result map of the dependency task from the plan's results
+			depResultRaw, ok := plan.GetResult(depTaskID) // Use safe GetResult method
 			if !ok {
 				// If it completed but result wasn't found, that's an internal error
 				return nil, fmt.Errorf(
-					"failed to find result '%s' from completed task '%s' needed for arg '%s'",
-					resultKey,
-					dependencyTaskID,
-					arg)
+					"internal error: failed to find result map for completed task '%s' needed for argument '%s'",
+					depTaskID,
+					argName,
+				)
 			}
 
-			// If the entire argument is the placeholder, assign the value directly
-			if arg == placeholder {
-				resolved[fmt.Sprintf("arg%d", i)] = value // Assign directly if arg is just the placeholder
-				replacedArg = ""                          // Mark as handled
-				break                                     // Assume only one placeholder if it matches the whole arg
-			} else {
-				// Otherwise, do string replacement (best effort)
-				// Convert value to string if it's not already
-				var valueStr string
-				switch v := value.(type) {
-				case string:
-					valueStr = v
-				case []byte:
-					valueStr = string(v)
-				default:
-					valueStr = fmt.Sprintf("%v", v)
+			// Assert that the result is a map[string]interface{}
+			depResultMap, ok := depResultRaw.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf(
+					"result for dependency task '%s' is not of expected type map[string]interface{} (got %T)",
+					depTaskID,
+					depResultRaw,
+				)
+			}
+
+			// Extract the specific field needed for the argument
+			value, fieldExists := depResultMap[outputFieldName]
+			if !fieldExists {
+				// Check if the user intended to pass the *entire* result map
+				if outputFieldName == "" || outputFieldName == "*" { // Convention for whole map
+					resolved[argName] = depResultMap
+				} else {
+					return nil, fmt.Errorf(
+						"output field '%s' not found in result map of dependency task '%s' for argument '%s'",
+						outputFieldName,
+						depTaskID,
+						argName,
+					)
 				}
-				replacedArg = strings.Replace(replacedArg, placeholder, valueStr, 1)
+			} else {
+				resolved[argName] = value
 			}
-		}
 
-		// If we did string replacements and haven't set the value directly
-		if replacedArg != "" {
-			resolved[fmt.Sprintf("arg%d", i)] = replacedArg
+		default:
+			return nil, fmt.Errorf("unknown argument source type '%s' for argument '%s'", argSource.Type, argName)
 		}
 	}
 
@@ -599,14 +642,12 @@ func (e *DAGExecutor) resolveArguments(ctx context.Context, args []string, plan 
 // calculatePriority assigns a priority to a task (lower is higher priority).
 // Placeholder implementation - a real implementation might use Critical Path Method.
 func (e *DAGExecutor) calculatePriority(task *dragonscale.Task, plan *dragonscale.ExecutionPlan) int {
-	// Simple heuristic: prioritize tasks with more downstream dependencies?
-	// Or prioritize based on estimated duration (if available)?
-	// Placeholder: Tasks with no dependencies get higher priority (priority 0).
-	// Tasks with dependencies get priority 1.
+	// Simple heuristic: prioritize tasks with no dependencies.
 	if len(task.DependsOn) == 0 {
 		return 0
 	}
-	// TODO: Could implement CPM here by traversing the graph
+	// TODO: Implement Critical Path Method (CPM) or other heuristics.
+	// For now, all dependent tasks have the same lower priority.
 	return 1
 }
 
@@ -620,28 +661,32 @@ func (e *DAGExecutor) resetMetrics() {
 	}
 }
 
-// updateTaskMetrics updates metrics based on a completed task
+// updateTaskMetrics updates metrics based on a completed or failed task
 func (e *DAGExecutor) updateTaskMetrics(task *dragonscale.Task) {
 	duration := task.Duration()
 
 	e.metrics.mu.Lock()
 	defer e.metrics.mu.Unlock()
 
-	e.metrics.TasksExecuted++
-	e.metrics.TotalDuration += duration
-	e.metrics.TotalRetries += task.RetryCount
+	// Only count metrics if the task actually ran (or attempted to run)
+	if task.GetStatus() == dragonscale.TaskStatusCompleted || task.GetStatus() == dragonscale.TaskStatusFailed || task.GetStatus() == dragonscale.TaskStatusCancelled {
+		e.metrics.TasksExecuted++ // Count executed/attempted tasks
+		e.metrics.TotalDuration += duration
+		e.metrics.TotalRetries += task.RetryCount // Total retries across all attempts for this task instance
 
-	if duration > e.metrics.LongestTaskTime {
-		e.metrics.LongestTaskTime = duration
-	}
+		if duration > e.metrics.LongestTaskTime {
+			e.metrics.LongestTaskTime = duration
+		}
 
-	if duration < e.metrics.ShortestTaskTime && duration > 0 {
-		e.metrics.ShortestTaskTime = duration
-	}
+		if duration < e.metrics.ShortestTaskTime && duration > 0 {
+			e.metrics.ShortestTaskTime = duration
+		}
 
-	if task.GetStatus() == dragonscale.TaskStatusCompleted {
-		e.metrics.TasksSuccessful++
-	} else if task.GetStatus() == dragonscale.TaskStatusFailed {
-		e.metrics.TasksFailed++
+		if task.GetStatus() == dragonscale.TaskStatusCompleted {
+			e.metrics.TasksSuccessful++
+		} else if task.GetStatus() == dragonscale.TaskStatusFailed {
+			e.metrics.TasksFailed++
+		}
+		// Note: Cancelled tasks are counted in TasksExecuted but not Successful/Failed
 	}
 }
