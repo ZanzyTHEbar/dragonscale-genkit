@@ -2,8 +2,8 @@ package adapters
 
 import (
 	"context"
-	"fmt"
 
+	"github.com/ZanzyTHEbar/dragonscale-genkit"
 	"github.com/firebase/genkit/go/core"
 )
 
@@ -27,7 +27,8 @@ func NewGenkitSolverAdapter(flow *core.Flow[*SolverInput, string, struct{}]) *Ge
 // Synthesize implements the dragonscale.Solver interface.
 func (a *GenkitSolverAdapter) Synthesize(ctx context.Context, query string, executionResults map[string]interface{}, retrievedContext string) (string, error) {
 	if a.solverFlow == nil {
-		return "", fmt.Errorf("solver flow is not configured")
+		// Use NewConfigurationError if the flow is not set
+		return "", dragonscale.NewConfigurationError("solver", "solver flow is not configured", nil)
 	}
 
 	input := SolverInput{
@@ -38,7 +39,8 @@ func (a *GenkitSolverAdapter) Synthesize(ctx context.Context, query string, exec
 
 	finalAnswer, err := a.solverFlow.Run(ctx, &input)
 	if err != nil {
-		return "", fmt.Errorf("solver flow execution failed: %w", err)
+		// Wrap the error using NewSolverError
+		return "", dragonscale.NewSolverError("solver flow execution failed", err)
 	}
 
 	return finalAnswer, nil

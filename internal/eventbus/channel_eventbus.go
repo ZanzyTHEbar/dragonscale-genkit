@@ -191,7 +191,7 @@ func (eb *ChannelEventBus) executeHandler(ctx context.Context, event Event, hand
 
 	if err != nil {
 		// Log the error but don't stop other handlers
-		// In a real implementation, we might want to publish a system error event
+		// TODO: In a real implementation, we might want to publish a system error event
 		fmt.Printf("Event handler error (event_type: %s, retries: %d): %v\n",
 			event.Type(), eb.maxRetries, err)
 	}

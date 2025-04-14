@@ -150,7 +150,7 @@ func WithTools(tools map[string]Tool) Option {
 func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale, error) {
 	if g == nil {
 		// Use NewConfigurationError for validation failures during initialization
-		return nil, NewConfigurationError("genkit instance is required", nil)
+		return nil, NewConfigurationError("initialization", "genkit instance is required", nil)
 	}
 
 	// Create with default configuration
@@ -168,7 +168,9 @@ func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale
 	// Validate the configuration
 	if err := ds.validateConfiguration(); err != nil {
 		// Wrap validation error using NewConfigurationError
-		return nil, NewConfigurationError("invalid configuration", err)
+		// The error from validateConfiguration is already a DragonScaleError (or ConfigurationError)
+		// so we can return it directly.
+		return nil, err
 	}
 
 	// Initialize event bus if enabled but not provided
@@ -188,31 +190,31 @@ func New(ctx context.Context, g *genkit.Genkit, options ...Option) (*DragonScale
 // Returns a DragonScaleError if validation fails.
 func (d *DragonScale) validateConfiguration() error { // Return type is now error
 	if d.planner == nil {
-		return NewError(ErrCodeConfiguration, "initialization", "planner is required", nil)
+		return NewConfigurationError("validation", "planner is required", nil)
 	}
 	if d.executor == nil {
-		return NewError(ErrCodeConfiguration, "initialization", "executor is required", nil)
+		return NewConfigurationError("validation", "executor is required", nil)
 	}
 	if d.solver == nil {
-		return NewError(ErrCodeConfiguration, "initialization", "solver is required", nil)
+		return NewConfigurationError("validation", "solver is required", nil)
 	}
 	if d.cache == nil {
-		return NewError(ErrCodeConfiguration, "initialization", "cache is required", nil)
+		return NewConfigurationError("validation", "cache is required", nil)
 	}
 	if len(d.tools) == 0 {
-		return NewError(ErrCodeConfiguration, "initialization", "at least one tool is required", nil)
+		return NewConfigurationError("validation", "at least one tool is required", nil)
 	}
 	if d.config.MaxConcurrentExecutions <= 0 {
-		return NewError(ErrCodeConfiguration, "initialization", "MaxConcurrentExecutions must be positive", nil)
+		return NewConfigurationError("validation", "MaxConcurrentExecutions must be positive", nil)
 	}
 	if d.config.MaxRetries < 0 {
-		return NewError(ErrCodeConfiguration, "initialization", "MaxRetries cannot be negative", nil)
+		return NewConfigurationError("validation", "MaxRetries cannot be negative", nil)
 	}
 	if d.config.RetryDelay < 0 {
-		return NewError(ErrCodeConfiguration, "initialization", "RetryDelay cannot be negative", nil)
+		return NewConfigurationError("validation", "RetryDelay cannot be negative", nil)
 	}
 	if d.config.ExecutionTimeout <= 0 {
-		return NewError(ErrCodeConfiguration, "initialization", "ExecutionTimeout must be positive", nil)
+		return NewConfigurationError("validation", "ExecutionTimeout must be positive", nil)
 	}
 	return nil
 }
@@ -221,7 +223,7 @@ func (d *DragonScale) validateConfiguration() error { // Return type is now erro
 func (d *DragonScale) RegisterTool(name string, tool Tool) error {
 	if _, exists := d.tools[name]; exists {
 		// Use NewConfigurationError for registration issues
-		return NewConfigurationError(fmt.Sprintf("tool with name '%s' already exists", name), nil)
+		return NewConfigurationError("registration", fmt.Sprintf("tool with name '%s' already exists", name), nil)
 	}
 
 	d.tools[name] = tool

@@ -27,18 +27,30 @@ const (
 type ArgumentSourceType string
 
 const (
-	// ArgumentSourceLiteral indicates the argument value is a literal string.
+	// ArgumentSourceLiteral indicates the argument value is a literal value (string, number, boolean, etc.).
 	ArgumentSourceLiteral ArgumentSourceType = "literal"
+	
 	// ArgumentSourceDependencyOutput indicates the argument value comes from the output of another task.
 	ArgumentSourceDependencyOutput ArgumentSourceType = "dependencyOutput"
+	
+	// ArgumentSourceExpression indicates the argument value is computed from an expression.
+	ArgumentSourceExpression ArgumentSourceType = "expression"
+	
+	// ArgumentSourceMerged indicates the argument value is merged from multiple sources.
+	ArgumentSourceMerged ArgumentSourceType = "merged"
 )
 
 // ArgumentSource defines where a task argument's value comes from.
 type ArgumentSource struct {
-	Type             ArgumentSourceType `json:"type"`
-	Value            string             `json:"value,omitempty"`            // Used for literal values
-	DependencyTaskID string             `json:"dependencyTaskId,omitempty"` // Task ID providing the output
-	OutputFieldName  string             `json:"outputFieldName,omitempty"`  // Key in the dependency's result map
+	Type             ArgumentSourceType     `json:"type"`
+	Value            interface{}            `json:"value,omitempty"`            // Used for literal values (can be any primitive type)
+	DependencyTaskID string                 `json:"dependencyTaskId,omitempty"` // Task ID providing the output
+	OutputFieldName  string                 `json:"outputFieldName,omitempty"`  // Key in the dependency's result map
+	Expression       string                 `json:"expression,omitempty"`       // Expression to evaluate (for expression type)
+	SourceMap        map[string]interface{} `json:"sourceMap,omitempty"`        // Additional metadata for complex source types
+	Required         bool                   `json:"required,omitempty"`         // Whether the argument is required (defaults to true)
+	DefaultValue     interface{}            `json:"defaultValue,omitempty"`     // Default value if resolution fails and not required
+	Description      string                 `json:"description,omitempty"`      // Optional description of the argument
 }
 
 // Task represents a single unit of work in the execution plan.

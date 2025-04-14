@@ -226,12 +226,3 @@ func (sm *StateMachine) Execute(ctx context.Context, pCtx *ProcessContext) (stri
 	// Return the final answer and any error encountered (including cancellation)
 	return pCtx.FinalAnswer, pCtx.LastError
 }
-
-// createCancelledTransition handles the cancelled state.
-func createCancelledTransition(_ DragonScaleComponents) StateTransition {
-	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
-		// This is a terminal state. The error (context.Canceled or DeadlineExceeded)
-		// should already be set in pCtx.LastError by the Execute loop or a transition.
-		return StateCancelled, pCtx.LastError // Remain in Cancelled state, return the cancellation error
-	}
-}
