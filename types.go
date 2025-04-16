@@ -78,10 +78,11 @@ type Task struct {
 
 // ExecutionPlan represents the Directed Acyclic Graph (DAG) of tasks.
 type ExecutionPlan struct {
-	Tasks      []Task                 `json:"tasks"`
-	TaskMap    map[string]*Task       `json:"-"` // Populated for quick lookup during execution
-	Results    map[string]interface{} `json:"-"` // Stores *full* results map of completed tasks (keyed by task ID)
-	StateMutex sync.RWMutex           `json:"-"` // Protects TaskMap and Results during execution
+Tasks      []Task                 `json:"tasks"`
+Dependents map[string][]string    `json:"-"` // Computed: task ID -> list of dependent task IDs
+TaskMap    map[string]*Task       `json:"-"` // Populated for quick lookup during execution
+Results    map[string]interface{} `json:"-"` // Stores *full* results map of completed tasks (keyed by task ID)
+StateMutex sync.RWMutex           `json:"-"` // Protects TaskMap and Results during execution
 }
 
 // PlannerInput contains the information needed by the Planner to generate a plan.

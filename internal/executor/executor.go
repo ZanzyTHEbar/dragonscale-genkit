@@ -105,7 +105,7 @@ func NewExecutor(toolRegistry map[string]dragonscale.Tool, options ...ExecutorOp
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &DAGExecutor{
-		toolRegistry: toolRegistry,      // Store the provided tool registry
+		toolRegistry: toolRegistry,    // Store the provided tool registry
 		maxWorkers:   5,               // Default max workers
 		maxRetries:   3,               // Default to 3 retries
 		retryDelay:   time.Second * 2, // Default 2-second delay
@@ -454,7 +454,7 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 
 		// Execute the tool directly
 		result, toolErr = tool.Execute(execCtx, resolvedArgs) // tool.Execute should return specific errors
-		cancel() // Cancel the timeout context immediately after execution
+		cancel()                                              // Cancel the timeout context immediately after execution
 
 		if toolErr == nil {
 			// Success! Break out of retry loop
@@ -573,7 +573,7 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 		}
 
 		// Store the *entire* result map in the plan, keyed by the task ID.
-		task.Result = result // Store the full result on the task itself for potential direct access/debugging
+		task.Result = result            // Store the full result on the task itself for potential direct access/debugging
 		plan.SetResult(task.ID, result) // Store the full result map in the plan's shared results
 		task.UpdateStatus(dragonscale.TaskStatusCompleted, nil)
 		log.Printf("Task execution completed successfully (task_id: %s, tool: %s, duration: %v)",
@@ -717,9 +717,9 @@ func (e *DAGExecutor) resolveArguments(ctx context.Context, task *dragonscale.Ta
 }
 
 // resolveDependencyOutput resolves an argument that depends on output from another task.
-func (e *DAGExecutor) resolveDependencyOutput(ctx context.Context, task *dragonscale.Task, 
+func (e *DAGExecutor) resolveDependencyOutput(ctx context.Context, task *dragonscale.Task,
 	plan *dragonscale.ExecutionPlan, argName string, argSource dragonscale.ArgumentSource) (interface{}, error) {
-	
+
 	depTaskID := argSource.DependencyTaskID
 	outputFieldName := argSource.OutputFieldName
 
@@ -756,7 +756,7 @@ func (e *DAGExecutor) resolveDependencyOutput(ctx context.Context, task *dragons
 		if outputFieldName == "" || outputFieldName == "*" {
 			return result, nil
 		}
-		
+
 		// Check if the requested field exists
 		value, exists := result[outputFieldName]
 		if !exists {
@@ -765,14 +765,14 @@ func (e *DAGExecutor) resolveDependencyOutput(ctx context.Context, task *dragons
 				outputFieldName, depTaskID))
 		}
 		return value, nil
-		
+
 	case []interface{}:
 		// Array result format
 		// If outputFieldName is empty or "*", return the entire array
 		if outputFieldName == "" || outputFieldName == "*" {
 			return result, nil
 		}
-		
+
 		// Try to interpret outputFieldName as an index if it's numeric
 		index, err := strconv.Atoi(outputFieldName)
 		if err != nil || index < 0 || index >= len(result) {
@@ -781,30 +781,77 @@ func (e *DAGExecutor) resolveDependencyOutput(ctx context.Context, task *dragons
 				outputFieldName, depTaskID, len(result)))
 		}
 		return result[index], nil
-		
+
 	default:
 		// Simple scalar result
 		// If outputFieldName is empty, return the raw value
 		if outputFieldName == "" || outputFieldName == "*" {
 			return result, nil
 		}
-		
+
 		return nil, dragonscale.NewArgResolutionError("execution", task.ID, argName, fmt.Errorf(
 			"cannot extract field '%s' from non-map result of dependency task '%s' (type: %T)",
 			outputFieldName, depTaskID, result))
 	}
 }
 
-// calculatePriority assigns a priority to a task (lower is higher priority).
-// Placeholder implementation - a real implementation might use Critical Path Method.
+// calculatePriority assigns a priority to a task using the Critical Path Method (CPM).
+// Tasks on the critical path (longest path to completion) receive the highest priority (lowest int value).
+// This implementation computes, for each task, the length of the longest path from this task to any leaf (task with no dependents).
+// Tasks with longer critical paths are prioritized to minimize total execution time and resource idling.
+// The result is negated so that tasks on the critical path have lower (higher-priority) values for the min-heap.
+//
+// Design decisions:
+// - Path lengths and dependents are computed locally per call, using the DependsOn array of each Task to infer which tasks depend on which others.
+// - If a cycle is detected, the function panics (DAG invariant).
+// - Tasks with no dependents (leaves) have path length 0.
+// - Priority = -criticalPathLength, so the min-heap executes critical tasks first.
 func (e *DAGExecutor) calculatePriority(task *dragonscale.Task, plan *dragonscale.ExecutionPlan) int {
-	// Simple heuristic: prioritize tasks with no dependencies.
-	if len(task.DependsOn) == 0 {
+	if plan == nil || plan.TaskMap == nil {
 		return 0
 	}
-	// TODO: Implement Critical Path Method (CPM) or other heuristics.
-	// For now, all dependent tasks have the same lower priority.
-	return 1
+
+// Build dependents map once per plan for efficiency.
+if plan.Dependents == nil {
+	dependents := make(map[string][]string, len(plan.TaskMap))
+	for _, t := range plan.TaskMap {
+		for _, depID := range t.DependsOn {
+			dependents[depID] = append(dependents[depID], t.ID)
+		}
+	}
+	plan.Dependents = dependents
+}
+dependents := plan.Dependents
+
+	// Use a local cache to avoid recomputation within this call.
+	pathLenCache := make(map[string]int, len(plan.TaskMap))
+
+	// Recursive DFS to compute the longest path from this task to any leaf.
+	var dfs func(tid string, visited map[string]bool) int
+	dfs = func(tid string, visited map[string]bool) int {
+		if v, ok := pathLenCache[tid]; ok {
+			return v
+		}
+		if visited[tid] {
+			panic("Cycle detected in task graph: not a DAG")
+		}
+		visited[tid] = true
+		defer func() { visited[tid] = false }()
+
+		maxLen := 0
+		for _, dep := range dependents[tid] {
+			l := 1 + dfs(dep, visited)
+			if l > maxLen {
+				maxLen = l
+			}
+		}
+		pathLenCache[tid] = maxLen
+		return maxLen
+	}
+
+	criticalPathLen := dfs(task.ID, make(map[string]bool))
+	// Negate so that longer paths (more critical) get higher priority (lower int)
+	return -criticalPathLen
 }
 
 // resetMetrics resets the execution metrics for a new run.
