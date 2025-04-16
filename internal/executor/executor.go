@@ -944,7 +944,16 @@ func (e *DAGExecutor) updateTaskMetrics(task *dragonscale.Task) {
 func (e *DAGExecutor) GetMetrics() ExecutorMetrics {
 	e.metrics.mu.Lock()
 	defer e.metrics.mu.Unlock()
-	return e.metrics
+	
+	return ExecutorMetrics{
+		TasksExecuted:    e.metrics.TasksExecuted,
+		TasksSuccessful:  e.metrics.TasksSuccessful,
+		TasksFailed:      e.metrics.TasksFailed,
+		TotalDuration:    e.metrics.TotalDuration,
+		LongestTaskTime:  e.metrics.LongestTaskTime,
+		ShortestTaskTime: e.metrics.ShortestTaskTime,
+		TotalRetries:     e.metrics.TotalRetries,
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
