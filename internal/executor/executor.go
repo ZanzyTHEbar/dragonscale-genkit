@@ -7,6 +7,7 @@ import (
 	"log"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,38 +24,6 @@ type TaskNode struct {
 	index    int // Index in the heap
 }
 
-// PriorityQueue implements heap.Interface and holds TaskNodes.
-type PriorityQueue []*TaskNode
-
-func (pq PriorityQueue) Len() int { return len(pq) }
-
-func (pq PriorityQueue) Less(i, j int) bool {
-	// Min-heap based on priority
-	return pq[i].priority < pq[j].priority
-}
-
-func (pq PriorityQueue) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
-	pq[i].index = i
-	pq[j].index = j
-}
-
-func (pq *PriorityQueue) Push(x interface{}) {
-	n := len(*pq)
-	node := x.(*TaskNode)
-	node.index = n
-	*pq = append(*pq, node)
-}
-
-func (pq *PriorityQueue) Pop() interface{} {
-	old := *pq
-	n := len(old)
-	node := old[n-1]
-	old[n-1] = nil  // avoid memory leak
-	node.index = -1 // for safety
-	*pq = old[0 : n-1]
-	return node
-}
 
 // DAGExecutor handles the execution of a task graph.
 type DAGExecutor struct {
@@ -133,7 +102,7 @@ func NewExecutor(toolRegistry map[string]dragonscale.Tool, options ...ExecutorOp
 	if e.toolRegistry == nil || len(e.toolRegistry) == 0 {
 		// Log a warning or handle as appropriate, depending on whether an empty registry is valid
 		log.Println("Warning: DAGExecutor initialized with an empty or nil tool registry.")
-		// Depending on requirements, you might return an error here:
+		// TODO: Depending on requirements, you might return an error here:
 		// return nil, fmt.Errorf("tool registry cannot be nil or empty")
 	}
 
@@ -956,67 +925,77 @@ func (e *DAGExecutor) GetMetrics() ExecutorMetrics {
 	}
 }
 
-
-// LoadAndValidateDAG loads and validates a DAG file, returning an ExecutionPlan (does not execute).
-// Use this to inspect or modify the plan before running.
-// Example:
-//   plan, err := executor.LoadAndValidateDAG("mydag.yaml")
-//   if err != nil { ... }
-//   results, err := exec.ExecutePlan(ctx, plan)
-
-////////////////////////////////////////////////////////////////////////////////
-// Minimal Expression Evaluator for ArgumentSourceExpression
-////////////////////////////////////////////////////////////////////////////////
-
-// evaluateSimpleExpression evaluates a simple arithmetic expression with variables
-// referencing dependency results. Supports +, -, *, /, parentheses, and variables
-// of the form $dep or $dep.field (where dep is a dependency task ID).
-//
-// Example: "$foo + 2", "$bar.value * 3"
+// evaluateSimpleExpression evaluates a robust, secure arithmetic/logical expression with variables.
+// Supports $dep, $dep.field, $dep.field[0], and custom functions. Returns structured errors.
 func (e *DAGExecutor) evaluateSimpleExpression(
 	ctx context.Context,
 	expr string,
 	task *dragonscale.Task,
 	plan *dragonscale.ExecutionPlan,
 ) (interface{}, error) {
-	// 1. Find all variables of the form $dep or $dep.field
-	varRe := regexp.MustCompile(`\$([a-zA-Z0-9_]+)(?:\.([a-zA-Z0-9_]+))?`)
+	varRe := regexp.MustCompile(`\$([a-zA-Z0-9_]+)((?:\.[a-zA-Z0-9_]+|\[[0-9]+\])*)`)
 	variables := map[string]interface{}{}
-	replaced := varRe.ReplaceAllStringFunc(expr, func(m string) string {
-		matches := varRe.FindStringSubmatch(m)
+	replaced := varRe.ReplaceAllStringFunc(expr, func(matched string) string {
+		matches := varRe.FindStringSubmatch(matched)
 		depID := matches[1]
-		field := matches[2]
+		accessors := matches[2]
 		depResult, ok := plan.GetResult(depID)
 		if !ok {
-			panic(fmt.Sprintf("Variable $%s not found in dependency results", depID))
+			variables[matched] = nil
+			return matched
 		}
-		var val interface{}
-		if field == "" {
-			val = depResult
-		} else {
-			if m, ok := depResult.(map[string]interface{}); ok {
-				val = m[field]
-			} else {
-				panic(fmt.Sprintf("Dependency result for $%s is not a map, cannot access field '%s'", depID, field))
+		val := depResult
+		accRe := regexp.MustCompile(`(\.[a-zA-Z0-9_]+|\[[0-9]+\])`)
+		accMatches := accRe.FindAllString(accessors, -1)
+		for _, acc := range accMatches {
+			if strings.HasPrefix(acc, ".") {
+				field := acc[1:]
+				if m, ok := val.(map[string]interface{}); ok {
+					v, ok := m[field]
+					if !ok {
+						variables[matched] = nil
+						return matched
+					}
+					val = v
+				} else {
+					variables[matched] = nil
+					return matched
+				}
+			} else if strings.HasPrefix(acc, "[") && strings.HasSuffix(acc, "]") {
+				idxStr := acc[1 : len(acc)-1]
+				idx, err := strconv.Atoi(idxStr)
+				if err != nil {
+					variables[matched] = nil
+					return matched
+				}
+				if arr, ok := val.([]interface{}); ok {
+					if idx < 0 || idx >= len(arr) {
+						variables[matched] = nil
+						return matched
+					}
+					val = arr[idx]
+				} else {
+					variables[matched] = nil
+					return matched
+				}
 			}
 		}
-		// Generate a unique variable name for govaluate
 		varName := depID
-		if field != "" {
-			varName = depID + "_" + field
+		for _, acc := range accMatches {
+			varName += strings.ReplaceAll(acc, ".", "_")
 		}
 		variables[varName] = val
 		return varName
 	})
 
-	// 2. Evaluate the resulting arithmetic expression using govaluate
-	evalExpr, err := govaluate.NewEvaluableExpression(replaced)
+	functions := getWhitelistedFunctions()
+	evalExpr, err := govaluate.NewEvaluableExpressionWithFunctions(replaced, functions)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse expression: %w", err)
+		return nil, dragonscale.NewInternalError("expression", fmt.Sprintf("failed to parse expression: %s", expr), err)
 	}
 	result, err := evalExpr.Evaluate(variables)
 	if err != nil {
-		return nil, fmt.Errorf("failed to evaluate expression: %w", err)
+		return nil, dragonscale.NewInternalError("expression", fmt.Sprintf("failed to evaluate expression: %s", expr), err)
 	}
 	return result, nil
 }
