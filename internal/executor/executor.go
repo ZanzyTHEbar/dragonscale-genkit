@@ -41,19 +41,6 @@ type DAGExecutor struct {
 	cancelFunc context.CancelFunc
 }
 
-// ExecutorMetrics tracks statistics about DAG execution.
-type ExecutorMetrics struct {
-	TasksExecuted    int
-	TasksSuccessful  int
-	TasksFailed      int
-	TotalDuration    time.Duration
-	LongestTaskTime  time.Duration
-	ShortestTaskTime time.Duration
-	TotalRetries     int
-
-	mu sync.Mutex // Protects metrics updates
-}
-
 // ExecutorOption represents an option for configuring the DAGExecutor.
 type ExecutorOption func(*DAGExecutor)
 
@@ -913,16 +900,7 @@ func (e *DAGExecutor) updateTaskMetrics(task *dragonscale.Task) {
 func (e *DAGExecutor) GetMetrics() ExecutorMetrics {
 	e.metrics.mu.Lock()
 	defer e.metrics.mu.Unlock()
-	
-	return ExecutorMetrics{
-		TasksExecuted:    e.metrics.TasksExecuted,
-		TasksSuccessful:  e.metrics.TasksSuccessful,
-		TasksFailed:      e.metrics.TasksFailed,
-		TotalDuration:    e.metrics.TotalDuration,
-		LongestTaskTime:  e.metrics.LongestTaskTime,
-		ShortestTaskTime: e.metrics.ShortestTaskTime,
-		TotalRetries:     e.metrics.TotalRetries,
-	}
+	return e.metrics.Copy()
 }
 
 // evaluateSimpleExpression evaluates a robust, secure arithmetic/logical expression with variables.

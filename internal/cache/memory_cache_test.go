@@ -7,7 +7,7 @@ import (
 )
 
 func TestInMemoryCache_SetAndGet(t *testing.T) {
-	cache := NewInMemoryCache(2 * time.Second)
+	cache := NewInMemoryCache(1 * time.Second)
 	ctx := context.Background()
 	key := "foo"
 	value := "bar"
@@ -27,7 +27,7 @@ func TestInMemoryCache_SetAndGet(t *testing.T) {
 }
 
 func TestInMemoryCache_Expiration(t *testing.T) {
-	cache := NewInMemoryCache(1 * time.Second)
+	cache := NewInMemoryCache(50 * time.Millisecond)
 	ctx := context.Background()
 	key := "baz"
 	value := "qux"
@@ -37,9 +37,33 @@ func TestInMemoryCache_Expiration(t *testing.T) {
 		t.Fatalf("Set failed: %v", err)
 	}
 
-	time.Sleep(1100 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
 	_, err = cache.Get(ctx, key)
 	if err == nil {
 		t.Errorf("expected error for expired item, got nil")
+	}
+}
+
+func TestInMemoryCache_Concurrency(t *testing.T) {
+	cache := NewInMemoryCache(1 * time.Second)
+	ctx := context.Background()
+	key := "concurrent"
+	value := "val"
+	setErr := make(chan error, 1)
+	getErr := make(chan error, 1)
+
+	go func() {
+		setErr <- cache.Set(ctx, key, value)
+	}()
+	go func() {
+		_, err := cache.Get(ctx, key)
+		getErr <- err
+	}()
+
+	if err := <-setErr; err != nil {
+		t.Errorf("Set failed: %v", err)
+	}
+	if err := <-getErr; err != nil && err.Error() != "cache: key not found" {
+		t.Errorf("unexpected Get error: %v", err)
 	}
 }
