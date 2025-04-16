@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go v0.120.0 // indirect
 	cloud.google.com/go/auth v0.15.0 // indirect
 	cloud.google.com/go/compute/metadata v0.6.0 // indirect
+	github.com/Knetic/govaluate v3.0.0+incompatible // indirect
 	github.com/ZanzyTHEbar/assert-lib v1.2.0 // indirect
 	github.com/ZanzyTHEbar/errbuilder-go v1.5.0 // indirect
 	github.com/aymerick/raymond v2.0.2+incompatible // indirect

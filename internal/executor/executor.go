@@ -5,12 +5,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
 
 	"container/heap"
 
+	"github.com/Knetic/govaluate"
 	"github.com/ZanzyTHEbar/dragonscale-genkit"
 )
 
@@ -60,6 +62,7 @@ type DAGExecutor struct {
 	maxWorkers   int           // Max concurrent tasks
 	maxRetries   int           // Max retries per task
 	retryDelay   time.Duration // Delay between retries
+	execTimeout  time.Duration // Per-task execution timeout
 
 	// Statistics and metrics
 	metrics ExecutorMetrics
@@ -99,6 +102,13 @@ func WithRetryDelay(delay time.Duration) ExecutorOption {
 	}
 }
 
+// WithExecTimeout sets the per-task execution timeout.
+func WithExecTimeout(timeout time.Duration) ExecutorOption {
+	return func(e *DAGExecutor) {
+		e.execTimeout = timeout
+	}
+}
+
 // NewExecutor creates a new executor with default settings.
 // It requires the tool registry to be passed during initialization.
 func NewExecutor(toolRegistry map[string]dragonscale.Tool, options ...ExecutorOption) *DAGExecutor {
@@ -109,6 +119,7 @@ func NewExecutor(toolRegistry map[string]dragonscale.Tool, options ...ExecutorOp
 		maxWorkers:   5,               // Default max workers
 		maxRetries:   3,               // Default to 3 retries
 		retryDelay:   time.Second * 2, // Default 2-second delay
+		execTimeout:  time.Minute * 5, // Default 5-minute timeout
 		ctx:          ctx,
 		cancelFunc:   cancel,
 	}
@@ -267,7 +278,7 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 					}
 					errMutex.Unlock()
 				}
-				// Handle other completion statuses if necessary (e.g., Cancelled)
+			// Handle other completion statuses if necessary (e.g., Cancelled)
 
 			case <-execCtx.Done():
 				// Context cancelled while waiting for a task to complete
@@ -449,7 +460,10 @@ func (e *DAGExecutor) executeTask(ctx context.Context, task *dragonscale.Task, p
 		}
 
 		// Execute the tool with timeout
-		execTimeout := time.Minute * 5 // TODO: Make this configurable via DragonScale Config
+		execTimeout := e.execTimeout
+		if execTimeout <= 0 {
+			execTimeout = time.Minute * 5
+		}
 		execCtx, cancel := context.WithTimeout(ctx, execTimeout)
 
 		// Execute the tool directly
@@ -676,10 +690,24 @@ func (e *DAGExecutor) resolveArguments(ctx context.Context, task *dragonscale.Ta
 			value, err = e.resolveDependencyOutput(ctx, task, plan, argName, argSource)
 
 		case dragonscale.ArgumentSourceExpression:
-			// For future implementation - evaluate expressions
-			err = dragonscale.NewInternalError("execution", fmt.Sprintf(
-				"expression-based argument sources are not yet implemented (argument '%s' for task '%s')",
-				argName, task.ID), nil)
+			// Minimal expression evaluator: supports arithmetic and references to dependency results.
+			expr := argSource.Expression
+			if expr == "" {
+				err = dragonscale.NewInternalError("execution", fmt.Sprintf(
+					"empty expression for argument '%s' in task '%s'", argName, task.ID), nil)
+				break
+			}
+			// For security and simplicity, only allow expressions of the form: "$dep.field + 2" or "$dep + 2"
+			// Parse variables: $dep or $dep.field
+			// Only support +, -, *, / and parentheses for now.
+			value, evalErr := e.evaluateSimpleExpression(ctx, expr, task, plan)
+			if evalErr != nil {
+				err = dragonscale.NewInternalError("execution", fmt.Sprintf(
+					"failed to evaluate expression for argument '%s' in task '%s': %v", argName, task.ID, evalErr), nil)
+			} else {
+				value = value
+				err = nil
+			}
 
 		case dragonscale.ArgumentSourceMerged:
 			// For future implementation - merge multiple sources
@@ -811,17 +839,17 @@ func (e *DAGExecutor) calculatePriority(task *dragonscale.Task, plan *dragonscal
 		return 0
 	}
 
-// Build dependents map once per plan for efficiency.
-if plan.Dependents == nil {
-	dependents := make(map[string][]string, len(plan.TaskMap))
-	for _, t := range plan.TaskMap {
-		for _, depID := range t.DependsOn {
-			dependents[depID] = append(dependents[depID], t.ID)
+	// Build dependents map once per plan for efficiency.
+	if plan.Dependents == nil {
+		dependents := make(map[string][]string, len(plan.TaskMap))
+		for _, t := range plan.TaskMap {
+			for _, depID := range t.DependsOn {
+				dependents[depID] = append(dependents[depID], t.ID)
+			}
 		}
+		plan.Dependents = dependents
 	}
-	plan.Dependents = dependents
-}
-dependents := plan.Dependents
+	dependents := plan.Dependents
 
 	// Use a local cache to avoid recomputation within this call.
 	pathLenCache := make(map[string]int, len(plan.TaskMap))
@@ -849,9 +877,9 @@ dependents := plan.Dependents
 		return maxLen
 	}
 
-	criticalPathLen := dfs(task.ID, make(map[string]bool))
+	criticalPathLength := dfs(task.ID, make(map[string]bool))
 	// Negate so that longer paths (more critical) get higher priority (lower int)
-	return -criticalPathLen
+	return -criticalPathLength
 }
 
 // resetMetrics resets the execution metrics for a new run.
@@ -892,4 +920,61 @@ func (e *DAGExecutor) updateTaskMetrics(task *dragonscale.Task) {
 		}
 		// Note: Cancelled tasks are counted in TasksExecuted but not Successful/Failed
 	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Minimal Expression Evaluator for ArgumentSourceExpression
+////////////////////////////////////////////////////////////////////////////////
+
+// evaluateSimpleExpression evaluates a simple arithmetic expression with variables
+// referencing dependency results. Supports +, -, *, /, parentheses, and variables
+// of the form $dep or $dep.field (where dep is a dependency task ID).
+//
+// Example: "$foo + 2", "$bar.value * 3"
+func (e *DAGExecutor) evaluateSimpleExpression(
+	ctx context.Context,
+	expr string,
+	task *dragonscale.Task,
+	plan *dragonscale.ExecutionPlan,
+) (interface{}, error) {
+	// 1. Find all variables of the form $dep or $dep.field
+	varRe := regexp.MustCompile(`\$([a-zA-Z0-9_]+)(?:\.([a-zA-Z0-9_]+))?`)
+	variables := map[string]interface{}{}
+	replaced := varRe.ReplaceAllStringFunc(expr, func(m string) string {
+		matches := varRe.FindStringSubmatch(m)
+		depID := matches[1]
+		field := matches[2]
+		depResult, ok := plan.GetResult(depID)
+		if !ok {
+			panic(fmt.Sprintf("Variable $%s not found in dependency results", depID))
+		}
+		var val interface{}
+		if field == "" {
+			val = depResult
+		} else {
+			if m, ok := depResult.(map[string]interface{}); ok {
+				val = m[field]
+			} else {
+				panic(fmt.Sprintf("Dependency result for $%s is not a map, cannot access field '%s'", depID, field))
+			}
+		}
+		// Generate a unique variable name for govaluate
+		varName := depID
+		if field != "" {
+			varName = depID + "_" + field
+		}
+		variables[varName] = val
+		return varName
+	})
+
+	// 2. Evaluate the resulting arithmetic expression using govaluate
+	evalExpr, err := govaluate.NewEvaluableExpression(replaced)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse expression: %w", err)
+	}
+	result, err := evalExpr.Evaluate(variables)
+	if err != nil {
+		return nil, fmt.Errorf("failed to evaluate expression: %w", err)
+	}
+	return result, nil
 }
