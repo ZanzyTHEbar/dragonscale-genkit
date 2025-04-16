@@ -956,6 +956,14 @@ func (e *DAGExecutor) GetMetrics() ExecutorMetrics {
 	}
 }
 
+
+// LoadAndValidateDAG loads and validates a DAG file, returning an ExecutionPlan (does not execute).
+// Use this to inspect or modify the plan before running.
+// Example:
+//   plan, err := executor.LoadAndValidateDAG("mydag.yaml")
+//   if err != nil { ... }
+//   results, err := exec.ExecutePlan(ctx, plan)
+
 ////////////////////////////////////////////////////////////////////////////////
 // Minimal Expression Evaluator for ArgumentSourceExpression
 ////////////////////////////////////////////////////////////////////////////////

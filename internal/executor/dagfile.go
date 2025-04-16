@@ -22,6 +22,39 @@ type DAGTask struct {
 	DependsOn []string               `yaml:"depends_on"`
 }
 
+// DAGFileLoader defines an interface for loading a DAGFile from a source (e.g., file, bytes, etc.).
+type DAGFileLoader interface {
+	Load(source string) (*DAGFile, error)
+	Format() string // e.g., "yaml", "json"
+}
+
+// loaderRegistry holds registered DAGFileLoaders by format name.
+var loaderRegistry = make(map[string]DAGFileLoader)
+
+// RegisterDAGFileLoader registers a new DAGFileLoader for a given format.
+func RegisterDAGFileLoader(loader DAGFileLoader) {
+	loaderRegistry[loader.Format()] = loader
+}
+
+// GetDAGFileLoader retrieves a loader by format name (e.g., "yaml").
+func GetDAGFileLoader(format string) (DAGFileLoader, bool) {
+	loader, ok := loaderRegistry[format]
+	return loader, ok
+}
+
+// YAMLLoader implements DAGFileLoader for YAML files.
+type YAMLLoader struct{}
+
+func (YAMLLoader) Load(path string) (*DAGFile, error) {
+	return LoadDAGFile(path)
+}
+
+func (YAMLLoader) Format() string { return "yaml" }
+
+func init() {
+	RegisterDAGFileLoader(YAMLLoader{})
+}
+
 // LoadDAGFile parses a YAML DAG file and returns a DAGFile struct.
 func LoadDAGFile(path string) (*DAGFile, error) {
 	f, err := os.Open(path)
@@ -139,4 +172,21 @@ func (dag *DAGFile) ToExecutionPlan() *dragonscale.ExecutionPlan {
 		})
 	}
 	return dragonscale.NewExecutionPlan(tasks)
+}
+
+// LoadAndValidateDAG loads a DAG file using the default loader (YAML), validates it, and returns an ExecutionPlan.
+func LoadAndValidateDAG(path string) (*dragonscale.ExecutionPlan, error) {
+	loader, ok := GetDAGFileLoader("yaml")
+	if !ok {
+		return nil, fmt.Errorf("no YAML DAG loader registered")
+	}
+
+	dagFile, err := loader.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := dagFile.Validate(); err != nil {
+		return nil, err
+	}
+	return dagFile.ToExecutionPlan(), nil
 }
