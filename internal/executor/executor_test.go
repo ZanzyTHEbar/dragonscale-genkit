@@ -9,20 +9,6 @@ import (
 	"github.com/ZanzyTHEbar/dragonscale-genkit"
 )
 
-type mockTool struct {
-	name     string
-	execFunc func(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error)
-}
-
-func (m *mockTool) Execute(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error) {
-	return m.execFunc(ctx, input)
-}
-func (m *mockTool) Schema() map[string]interface{} {
-	return map[string]interface{}{"description": "mock"}
-}
-func (m *mockTool) Validate(input map[string]interface{}) error { return nil }
-func (m *mockTool) Name() string                                { return m.name }
-
 func TestDAGExecutor_ExecutePlan_SuccessAndFailure(t *testing.T) {
 	executor := &DAGExecutor{
 		toolRegistry: map[string]dragonscale.Tool{
