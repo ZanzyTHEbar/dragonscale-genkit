@@ -164,7 +164,12 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 	// Initial population of the ready queue
 	readyTasks := e.findReadyTasks(plan)
 	for _, task := range readyTasks {
-		node := &TaskNode{task: task, priority: e.calculatePriority(task, plan)} // Add priority calculation
+		priority, err := e.calculatePriority(task, plan)
+		if err != nil {
+			log.Printf("Error calculating priority for task %s: %v", task.ID, err)
+			continue // Skip this task, or handle as needed
+		}
+		node := &TaskNode{task: task, priority: priority} // Add priority calculation
 		heap.Push(&priorityQueue, node)
 		task.UpdateStatus(dragonscale.TaskStatusReady, nil)
 	}
@@ -244,9 +249,14 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 
 						// Reset the task for retry
 						completedTask.Retry()
+						priority, err := e.calculatePriority(completedTask, plan)
+						if err != nil {
+							log.Printf("Error calculating priority for retry of task %s: %v", completedTask.ID, err)
+							continue // Skip retry if cycle detected
+						}
 						node := &TaskNode{
 							task:     completedTask,
-							priority: e.calculatePriority(completedTask, plan) - 5, // Higher priority for retries
+							priority: priority - 5, // Higher priority for retries
 						}
 						heap.Push(&priorityQueue, node)
 						continue // Continue the loop to potentially launch the retry
@@ -270,7 +280,12 @@ func (e *DAGExecutor) ExecutePlan(ctx context.Context, plan *dragonscale.Executi
 						newlyReady := e.findNewlyReadyTasks(completedTask, plan)
 						for _, nextTask := range newlyReady {
 							if nextTask.GetStatus() == dragonscale.TaskStatusPending { // Ensure we only add pending tasks
-								node := &TaskNode{task: nextTask, priority: e.calculatePriority(nextTask, plan)}
+								priority, err := e.calculatePriority(nextTask, plan)
+								if err != nil {
+									log.Printf("Error calculating priority for task %s: %v", nextTask.ID, err)
+									continue
+								}
+								node := &TaskNode{task: nextTask, priority: priority}
 								heap.Push(&priorityQueue, node)
 								nextTask.UpdateStatus(dragonscale.TaskStatusReady, nil)
 							}
@@ -829,14 +844,10 @@ func (e *DAGExecutor) resolveDependencyOutput(ctx context.Context, task *dragons
 // Tasks with longer critical paths are prioritized to minimize total execution time and resource idling.
 // The result is negated so that tasks on the critical path have lower (higher-priority) values for the min-heap.
 //
-// Design decisions:
-// - Path lengths and dependents are computed locally per call, using the DependsOn array of each Task to infer which tasks depend on which others.
-// - If a cycle is detected, the function panics (DAG invariant).
-// - Tasks with no dependents (leaves) have path length 0.
-// - Priority = -criticalPathLength, so the min-heap executes critical tasks first.
-func (e *DAGExecutor) calculatePriority(task *dragonscale.Task, plan *dragonscale.ExecutionPlan) int {
+// Returns (priority, error). If a cycle is detected, returns an error instead of panicking.
+func (e *DAGExecutor) calculatePriority(task *dragonscale.Task, plan *dragonscale.ExecutionPlan) (int, error) {
 	if plan == nil || plan.TaskMap == nil {
-		return 0
+		return 0, nil
 	}
 
 	// Build dependents map once per plan for efficiency.
@@ -855,31 +866,38 @@ func (e *DAGExecutor) calculatePriority(task *dragonscale.Task, plan *dragonscal
 	pathLenCache := make(map[string]int, len(plan.TaskMap))
 
 	// Recursive DFS to compute the longest path from this task to any leaf.
-	var dfs func(tid string, visited map[string]bool) int
-	dfs = func(tid string, visited map[string]bool) int {
+	var dfs func(tid string, visited map[string]bool) (int, error)
+	dfs = func(tid string, visited map[string]bool) (int, error) {
 		if v, ok := pathLenCache[tid]; ok {
-			return v
+			return v, nil
 		}
 		if visited[tid] {
-			panic("Cycle detected in task graph: not a DAG")
+			return 0, fmt.Errorf("cycle detected in task graph at task '%s': not a DAG", tid)
 		}
 		visited[tid] = true
 		defer func() { visited[tid] = false }()
 
 		maxLen := 0
 		for _, dep := range dependents[tid] {
-			l := 1 + dfs(dep, visited)
+			l, err := dfs(dep, visited)
+			if err != nil {
+				return 0, err
+			}
+			l = 1 + l
 			if l > maxLen {
 				maxLen = l
 			}
 		}
 		pathLenCache[tid] = maxLen
-		return maxLen
+		return maxLen, nil
 	}
 
-	criticalPathLength := dfs(task.ID, make(map[string]bool))
+	criticalPathLength, err := dfs(task.ID, make(map[string]bool))
+	if err != nil {
+		return 0, err
+	}
 	// Negate so that longer paths (more critical) get higher priority (lower int)
-	return -criticalPathLength
+	return -criticalPathLength, nil
 }
 
 // resetMetrics resets the execution metrics for a new run.
@@ -920,6 +938,13 @@ func (e *DAGExecutor) updateTaskMetrics(task *dragonscale.Task) {
 		}
 		// Note: Cancelled tasks are counted in TasksExecuted but not Successful/Failed
 	}
+}
+
+// GetMetrics returns a copy of the current execution metrics.
+func (e *DAGExecutor) GetMetrics() ExecutorMetrics {
+	e.metrics.mu.Lock()
+	defer e.metrics.mu.Unlock()
+	return e.metrics
 }
 
 ////////////////////////////////////////////////////////////////////////////////
