@@ -13,6 +13,8 @@
 
 DragonScale is a modular, extensible workflow automation framework powered by AI. It provides a structured approach to building AI-powered applications that can plan, execute, and solve complex tasks using tools and context retrieval.
 
+LLM-Driven task execution. Register the tool once, the LLM does the rest.
+
 ## Overview
 
 DragonScale orchestrates AI workflows through a powerful pipeline:
