@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -63,7 +64,7 @@ func TestInMemoryCache_Concurrency(t *testing.T) {
 	if err := <-setErr; err != nil {
 		t.Errorf("Set failed: %v", err)
 	}
-	if err := <-getErr; err != nil && err.Error() != "cache: key not found" {
+	if err := <-getErr; err != nil && !strings.Contains(err.Error(), "not found") {
 		t.Errorf("unexpected Get error: %v", err)
 	}
 }

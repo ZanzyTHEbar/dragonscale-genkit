@@ -45,7 +45,7 @@ type DragonScaleComponents struct {
 	Config     Config
 	
 	// Function to retrieve tool schemas
-	GetSchemas func() map[string]map[string]interface{} // Updated return type
+	GetSchemas func() map[string]map[string]interface{}
 }
 
 // Config holds the configuration options for the DragonScale runtime.

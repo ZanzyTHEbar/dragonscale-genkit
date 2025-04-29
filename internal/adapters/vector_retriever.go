@@ -110,8 +110,11 @@ func (r *VectorStoreRetriever) RetrieveContext(ctx context.Context, query string
 			break
 		}
 
-		formattedContext += fmt.Sprintf("--- Document %d (score: %.4f) ---\n%s\n\n",
-			i+1, score, doc.Content)
+		// Compile the document parts into a single string.
+		//docText := compileDocumentParts(doc.Content)
+
+		//formattedContext += fmt.Sprintf("--- Document %d (score: %.4f) ---\n%s\n\n",
+		//	i+1, score, docText)
 		totalTokens += estTokens
 	}
 
