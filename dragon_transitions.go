@@ -21,6 +21,7 @@ func CreateProcessStateMachine(components DragonScaleComponents, eventBus eventb
 	sm.RegisterTransition(StateSynthesis, createSynthesisTransition(components))
 	sm.RegisterTransition(StateError, createErrorTransition(components))
 	sm.RegisterTransition(StateComplete, createCompleteTransition(components))
+	sm.RegisterTransition(StateCancelled, createCancelledTransition(components)) // Add cancelled transition
 
 	return sm
 }
@@ -62,29 +63,33 @@ func createPlanningTransition(components DragonScaleComponents) StateTransition 
 		hasEventBus := eb != nil
 		planner := components.Planner
 
-		// Cast the input to the expected type
-		plannerInput, ok := pCtx.PlannerInput.(map[string]interface{})
-		if !ok {
-			return StateError, fmt.Errorf("invalid planner input type")
+		// Prepare planner input using the defined struct
+		plannerInput := PlannerInput{
+			Query:      pCtx.Query,
+			ToolSchema: components.GetSchemas(), // Should now match PlannerInput.ToolSchema type
+			// CurrentState and Reason would be populated if replanning
 		}
+		pCtx.PlannerInput = plannerInput // Store the structured input
 
 		if hasEventBus {
 			// Publish planning started event
 			planStartEvent := eventbus.NewEvent(
 				eventbus.EventPlanGenerationStarted,
-				plannerInput,
+				plannerInput, // Use the structured input
 				"StateMachine.Planning",
 				nil,
 			)
 			eb.Publish(ctx, planStartEvent)
 		}
 
-		// Call the planner through reflection or type assertion
-		// TODO: This is a simplified example - the actual implementation would need to match your Planner interface
-		executionPlan, err := planner.(interface {
-			GeneratePlan(context.Context, interface{}) (interface{}, error)
-		}).GeneratePlan(ctx, plannerInput)
+		// Call the planner directly using the interface
+		executionPlan, err := planner.GeneratePlan(ctx, plannerInput)
 		if err != nil {
+			// Wrap the error in a PlannerError if it's not already a DragonScaleError
+			if !IsDragonScaleError(err) {
+				err = NewPlannerError("failed to generate execution plan", err)
+			}
+			
 			if hasEventBus {
 				// Publish failure events
 				failEvent := eventbus.NewEvent(
@@ -108,20 +113,45 @@ func createPlanningTransition(components DragonScaleComponents) StateTransition 
 				)
 				eb.Publish(ctx, queryFailEvent)
 			}
-			return StateError, fmt.Errorf("failed to generate execution plan: %w", err)
+			return StateError, err // Return the wrapped error directly
+		}
+
+		// Validate the plan before proceeding
+		if executionPlan == nil {
+			err := NewPlannerError("planner generated a nil execution plan", nil)
+			if hasEventBus {
+				// Publish failure events
+				failEvent := eventbus.NewEvent(
+					eventbus.EventPlanGenerationFailure,
+					err.Error(),
+					"StateMachine.Planning",
+					map[string]interface{}{
+						"error": err.Error(),
+					},
+				)
+				eb.Publish(ctx, failEvent)
+				queryFailEvent := eventbus.NewEvent(
+					eventbus.EventQueryProcessingFailure,
+					pCtx.Query,
+					"StateMachine.Planning",
+					map[string]interface{}{
+						"error": err.Error(),
+						"stage": "plan_generation",
+					},
+				)
+				eb.Publish(ctx, queryFailEvent)
+			}
+			return StateError, err
 		}
 
 		if hasEventBus {
 			// Determine task count for metadata
-			var taskCount int
-			if plan, ok := executionPlan.(interface{ GetTaskCount() int }); ok {
-				taskCount = plan.GetTaskCount()
-			}
+			taskCount := len(executionPlan.Tasks) // Use the Tasks slice length directly
 
 			// Publish success event
 			planSuccessEvent := eventbus.NewEvent(
 				eventbus.EventPlanGenerationSuccess,
-				executionPlan,
+				executionPlan, // Pass the plan directly
 				"StateMachine.Planning",
 				map[string]interface{}{
 					"task_count": taskCount,
@@ -131,7 +161,7 @@ func createPlanningTransition(components DragonScaleComponents) StateTransition 
 		}
 
 		// Store execution plan
-		pCtx.ExecutionPlan = executionPlan
+		pCtx.ExecutionPlan = executionPlan // Store the *ExecutionPlan
 
 		// Move to execution state
 		return StateExecution, nil
@@ -144,15 +174,27 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 		hasEventBus := eb != nil
 		executor := components.Executor
 
-		// Get the execution plan
-		executionPlan := pCtx.ExecutionPlan
+		// Get the execution plan and assert its type
+		planInterface := pCtx.ExecutionPlan
+		if planInterface == nil {
+			// Use NewInternalError for unexpected nil plan
+			return StateError, NewInternalError("execution", "execution plan is nil in execution state", nil)
+		}
+		executionPlan, ok := planInterface.(*ExecutionPlan)
+		if !ok {
+			// Use NewInternalError for type assertion failure
+			msg := fmt.Sprintf("invalid type for execution plan in context: expected *ExecutionPlan, got %T", planInterface)
+			return StateError, NewInternalError("execution", msg, nil)
+		}
+		// Further validation: ensure the plan itself isn't nil after assertion
+		if executionPlan == nil {
+			// Use NewInternalError for unexpected nil plan after assertion
+			return StateError, NewInternalError("execution", "execution plan asserted to *ExecutionPlan is nil", nil)
+		}
 
 		if hasEventBus {
 			// Determine task count for metadata
-			var taskCount int
-			if plan, ok := executionPlan.(interface{ GetTaskCount() int }); ok {
-				taskCount = plan.GetTaskCount()
-			}
+			taskCount := len(executionPlan.Tasks) // Now use the asserted type
 
 			// Publish DAG execution started event
 			dagStartEvent := eventbus.NewEvent(
@@ -166,11 +208,14 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 			eb.Publish(ctx, dagStartEvent)
 		}
 
-		// Execute the plan
-		executionResults, err := executor.(interface {
-			ExecutePlan(context.Context, interface{}) (map[string]interface{}, error)
-		}).ExecutePlan(ctx, executionPlan)
+		// Execute the plan directly using the interface
+		executionResults, err := executor.ExecutePlan(ctx, executionPlan) // Pass the asserted type
 		if err != nil {
+			// Wrap executor error if not already a DragonScaleError
+			if !IsDragonScaleError(err) {
+				err = NewExecutorError("execution", "DAG execution failed", err)
+			}
+			
 			if hasEventBus {
 				// Publish failure events
 				dagFailEvent := eventbus.NewEvent(
@@ -194,7 +239,7 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 				)
 				eb.Publish(ctx, queryFailEvent)
 			}
-			return StateError, fmt.Errorf("DAG execution failed: %w", err)
+			return StateError, err
 		}
 
 		if hasEventBus {
@@ -229,7 +274,20 @@ func createExecutionTransition(components DragonScaleComponents) StateTransition
 func createRetrievalTransition(components DragonScaleComponents) StateTransition {
 	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
 		hasEventBus := eb != nil
-		retriever := components.Retriever
+		retriever := components.Retriever // Assumes retriever is not nil because we checked in previous state
+
+		// Get the execution plan and assert its type (needed for retriever context)
+		var executionPlan *ExecutionPlan // Declare variable to hold asserted plan
+		if pCtx.ExecutionPlan != nil {
+			planInterface := pCtx.ExecutionPlan
+			var ok bool
+			executionPlan, ok = planInterface.(*ExecutionPlan)
+			if !ok {
+				// Log or handle the error, but maybe proceed without the plan?
+				log.Printf("Warning: Invalid type for execution plan in context during retrieval: expected *ExecutionPlan, got %T. Proceeding without plan context.", planInterface)
+				executionPlan = nil // Ensure it's nil if assertion fails
+			}
+		}
 
 		if hasEventBus {
 			// Publish retrieval started event
@@ -242,19 +300,20 @@ func createRetrievalTransition(components DragonScaleComponents) StateTransition
 			eb.Publish(ctx, retrievalStartEvent)
 		}
 
-		// Retrieve context
-		retrievedContext, err := retriever.(interface {
-			RetrieveContext(context.Context, string, interface{}) (string, error)
-		}).RetrieveContext(ctx, pCtx.Query, pCtx.ExecutionPlan)
+		// Retrieve context directly using the interface, passing the asserted plan (or nil)
+		retrievedContext, err := retriever.RetrieveContext(ctx, pCtx.Query, executionPlan)
 		if err != nil {
-			// Log error but don't fail the process
-			log.Printf("Context retrieval failed: %v", err)
+			// Wrap retriever error if not already a DragonScaleError
+			if !IsDragonScaleError(err) {
+				err = NewRetrieverError("context retrieval failed", err)
+			}
+			log.Printf("%v", err) // Log the wrapped error
 
 			if hasEventBus {
 				// Publish failure event but don't stop processing
 				retrievalFailEvent := eventbus.NewEvent(
 					eventbus.EventContextRetrievalFailure,
-					err.Error(),
+					err.Error(), // Use wrapped error message
 					"StateMachine.Retrieval",
 					map[string]interface{}{
 						"error": err.Error(),
@@ -262,6 +321,7 @@ func createRetrievalTransition(components DragonScaleComponents) StateTransition
 				)
 				eb.Publish(ctx, retrievalFailEvent)
 			}
+			// Don't return the error, just log it and proceed
 		} else if hasEventBus {
 			// Publish success event
 			retrievalSuccessEvent := eventbus.NewEvent(
@@ -303,11 +363,14 @@ func createSynthesisTransition(components DragonScaleComponents) StateTransition
 			eb.Publish(ctx, synthesisStartEvent)
 		}
 
-		// Synthesize final answer
-		finalAnswer, err := solver.(interface {
-			Synthesize(context.Context, string, map[string]interface{}, string) (string, error)
-		}).Synthesize(ctx, pCtx.Query, pCtx.ExecutionResults, pCtx.RetrievedContext)
+		// Synthesize final answer directly using the interface
+		finalAnswer, err := solver.Synthesize(ctx, pCtx.Query, pCtx.ExecutionResults, pCtx.RetrievedContext)
 		if err != nil {
+			// Wrap solver error if not already a DragonScaleError
+			if !IsDragonScaleError(err) {
+				err = NewSolverError("failed to synthesize final answer", err)
+			}
+			
 			if hasEventBus {
 				// Publish failure events
 				synthesisFailEvent := eventbus.NewEvent(
@@ -331,7 +394,7 @@ func createSynthesisTransition(components DragonScaleComponents) StateTransition
 				)
 				eb.Publish(ctx, queryFailEvent)
 			}
-			return StateError, fmt.Errorf("failed to synthesize final answer: %w", err)
+			return StateError, err
 		}
 
 		if hasEventBus {
@@ -368,25 +431,45 @@ func createSynthesisTransition(components DragonScaleComponents) StateTransition
 // createErrorTransition handles error states.
 func createErrorTransition(_ DragonScaleComponents) StateTransition {
 	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
-		// At this point, the error is already recorded in the process context
-		// We just need to decide what to do next
+		// Log the specific error details if it's a DragonScaleError
+		if dsErr, ok := pCtx.LastError.(*DragonScaleError); ok {
+			log.Printf("Entering Error state (execution_id: %v) due to [%s:%s]: %s (Cause: %v)",
+				pCtx.StateData["execution_id"], dsErr.Code, dsErr.Scope, dsErr.Message, dsErr.Cause)
+		} else if pCtx.LastError != nil {
+			log.Printf("Entering Error state (execution_id: %v) due to: %v",
+				pCtx.StateData["execution_id"], pCtx.LastError)
+		} else {
+			log.Printf("Entering Error state (execution_id: %v) with nil error (unexpected)",
+				pCtx.StateData["execution_id"])
+		}
 
-		// In a more sophisticated implementation, we might:
-		// 1. Check for retry conditions
-		// 2. Try alternative paths
-		// 3. Fall back to a simpler processing method
-
-		// For now, we'll just transition to complete with the error intact
+		// TODO: For now, we'll just transition to complete with the error intact
 		// The error will be returned when Execute completes
-		return StateComplete, pCtx.LastError
+		// The state machine Execute loop already sets the state to Error/Cancelled
+		// This transition function essentially just logs and confirms the terminal state.
+		return StateError, pCtx.LastError // Remain in Error state, return the original error
 	}
 }
 
 // createCompleteTransition handles the complete state.
 func createCompleteTransition(_ DragonScaleComponents) StateTransition {
 	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
+		log.Printf("Entering Complete state (execution_id: %v)", pCtx.StateData["execution_id"])
 		// This is a terminal state - nothing to do
 		// The state machine's Execute method will handle returning the final result
-		return StateComplete, nil
+		return StateComplete, nil // Remain in Complete state
+	}
+}
+
+// createCancelledTransition handles the cancelled state.
+func createCancelledTransition(_ DragonScaleComponents) StateTransition {
+	return func(ctx context.Context, eb eventbus.EventBus, pCtx *ProcessContext) (ProcessState, error) {
+		// Log the cancellation
+		log.Printf("Entering Cancelled state (execution_id: %v) due to: %v",
+			pCtx.StateData["execution_id"], pCtx.LastError)
+
+		// This is a terminal state. The error (context.Canceled or DeadlineExceeded)
+		// should already be set in pCtx.LastError by the Execute loop or a transition.
+		return StateCancelled, pCtx.LastError // Remain in Cancelled state, return the cancellation error
 	}
 }

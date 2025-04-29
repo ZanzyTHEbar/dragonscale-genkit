@@ -145,7 +145,7 @@ func validateCalculationInput(input map[string]interface{}) error {
 		return fmt.Errorf("expression too long (max 100 characters)")
 	}
 
-	// Could add more sophisticated validation for valid expressions here
+	// TODO: Could add more sophisticated validation for valid expressions here
 
 	return nil
 }

@@ -10,9 +10,9 @@ import (
 
 //! The pushdown automaton approach was specifically chosen because:
 //!
-//! TODO: It allows tracking the execution history (through the state stack)
-//! TODO: It supports branching and alternative paths through the workflow
-//! It can easily be extended to support retries, fallbacks, or other complex patterns
+//! It allows tracking the execution history (through the state stack) - Implemented!
+//! TODO: It supports branching and alternative paths through the workflow (stack enables this)
+//! It can easily be extended to support retries, fallbacks, or other complex patterns (stack enables this)
 //! It provides better visibility into the execution progress
 
 // ProcessState represents the current state of a process execution.
@@ -33,6 +33,10 @@ const (
 	StateError ProcessState = "error"
 	// StateComplete represents the completed state
 	StateComplete ProcessState = "complete"
+	// StateCancelled represents the cancelled state
+	StateCancelled ProcessState = "cancelled"
+	// StateUnknown is used when the status of an async execution cannot be determined.
+	StateUnknown ProcessState = "unknown" // Added StateUnknown
 )
 
 // ProcessContext contains the data needed for process execution.
@@ -54,7 +58,7 @@ type ProcessContext struct {
 
 	// State management
 	CurrentState ProcessState
-	StateStack   []ProcessState
+	StateStack   []ProcessState // Stores the history of states visited
 	StateData    map[string]interface{}
 
 	// Timestamp tracking
@@ -68,18 +72,11 @@ func NewProcessContext(query string) *ProcessContext {
 	return &ProcessContext{
 		Query:           query,
 		CurrentState:    StateInit,
-		StateStack:      []ProcessState{},
+		StateStack:      []ProcessState{}, // Initialize empty stack
 		StateData:       make(map[string]interface{}),
 		StartTime:       time.Now(),
 		StateStartTimes: make(map[ProcessState]time.Time),
 	}
-}
-
-// PushState pushes the current state onto the stack and sets a new current state.
-func (pc *ProcessContext) PushState(state ProcessState) {
-	pc.StateStack = append(pc.StateStack, pc.CurrentState)
-	pc.CurrentState = state
-	pc.StateStartTimes[state] = time.Now()
 }
 
 // PopState pops the top state from the stack and sets it as the current state.
@@ -95,12 +92,32 @@ func (pc *ProcessContext) PopState() bool {
 	return true
 }
 
-// SetError sets the last error and error stage.
+// GetHistory returns a copy of the state execution history.
+func (pc *ProcessContext) GetHistory() []ProcessState {
+	history := make([]ProcessState, len(pc.StateStack))
+	copy(history, pc.StateStack)
+	return history
+}
+
+// IsTerminal checks if the current state is a terminal state (Complete, Error, Cancelled).
+func (pc *ProcessContext) IsTerminal() bool {
+	return pc.CurrentState == StateComplete || pc.CurrentState == StateError || pc.CurrentState == StateCancelled
+}
+
+// SetError sets the last error and error stage, transitioning to StateError.
 func (pc *ProcessContext) SetError(err error, stage string) {
 	pc.LastError = err
 	pc.ErrorStage = stage
 	pc.CurrentState = StateError
 	pc.StateStartTimes[StateError] = time.Now()
+}
+
+// SetCancelled sets the state to Cancelled and records the cancellation error.
+func (pc *ProcessContext) SetCancelled(err error, stage string) {
+	pc.LastError = err
+	pc.ErrorStage = stage // Record the stage where cancellation was detected
+	pc.CurrentState = StateCancelled
+	pc.StateStartTimes[StateCancelled] = time.Now()
 }
 
 // Complete marks the process as complete and sets the end time.
@@ -113,7 +130,7 @@ func (pc *ProcessContext) Complete() {
 // GetStateDuration returns the duration spent in the given state.
 func (pc *ProcessContext) GetStateDuration(state ProcessState) time.Duration {
 	startTime, ok := pc.StateStartTimes[state]
-	if !ok {
+	if (!ok) {
 		return 0
 	}
 
@@ -122,7 +139,7 @@ func (pc *ProcessContext) GetStateDuration(state ProcessState) time.Duration {
 	}
 
 	// For past states, we'd need to track end times for each state
-	// This is a simplified implementation
+	// TODO: This is a simplified implementation
 	return 0
 }
 
@@ -158,31 +175,77 @@ func (sm *StateMachine) RegisterTransition(state ProcessState, transition StateT
 
 // Execute runs the state machine until completion or error.
 func (sm *StateMachine) Execute(ctx context.Context, pCtx *ProcessContext) (string, error) {
-	for {
-		transition, ok := sm.transitions[pCtx.CurrentState]
-		if !ok {
-			return "", fmt.Errorf("no transition registered for state %s", pCtx.CurrentState)
+	// Record the initial state's start time
+	pCtx.StateStartTimes[pCtx.CurrentState] = time.Now()
+
+	for !pCtx.IsTerminal() { // Use the new IsTerminal method
+		// Check for context cancellation before executing the next state
+		select {
+		case <-ctx.Done():
+			// Context was cancelled
+			err := ctx.Err()
+			currentStage := string(pCtx.CurrentState)
+			pCtx.SetCancelled(err, currentStage) // Use SetCancelled method
+			// Push the final cancelled state onto the history stack before returning
+			pCtx.StateStack = append(pCtx.StateStack, pCtx.CurrentState)
+			return "", err // Return the cancellation error
+		default:
+			// Context is still active, proceed
 		}
 
+		// Find the transition for the current state
+		transition, exists := sm.transitions[pCtx.CurrentState]
+		if !exists {
+			err := fmt.Errorf("no transition defined for state: %s", pCtx.CurrentState)
+			currentStage := string(pCtx.CurrentState)
+			pCtx.SetError(err, currentStage) // Use SetError
+			// Push the final error state onto the history stack before returning
+			pCtx.StateStack = append(pCtx.StateStack, pCtx.CurrentState)
+			return "", err
+		}
+
+		// Push the current state onto the stack *before* executing the transition
+		// This records the history of states entered.
+		pCtx.StateStack = append(pCtx.StateStack, pCtx.CurrentState)
+
+		// Execute the transition function for the current state
 		nextState, err := transition(ctx, sm.eventBus, pCtx)
-		if err != nil {
-			// Error already recorded in the process context
-			if pCtx.CurrentState == StateError {
-				return "", pCtx.LastError
-			}
 
-			pCtx.SetError(err, string(pCtx.CurrentState))
-			continue
+		if err != nil {
+			currentStage := string(pCtx.CurrentState) // Stage where error occurred during transition
+			// Check if the error is due to context cancellation (might be caught within the transition)
+			if err == context.Canceled || err == context.DeadlineExceeded {
+				pCtx.SetCancelled(err, currentStage) // Use SetCancelled
+			} else {
+				// SetError is usually called within the transition for specific errors,
+				// but if a transition returns a non-cancellation error without setting state,
+				// we set it here.
+				if !pCtx.IsTerminal() { // Avoid overwriting if already set to Error/Cancelled
+					pCtx.SetError(err, currentStage)
+				}
+			}
+			// The loop will continue and check IsTerminal() again. The error state
+			// will be pushed onto the stack in the next iteration before exiting.
+			continue // Go to the top of the loop to check terminal state
 		}
 
-		// State transition
-		pCtx.CurrentState = nextState
-		pCtx.StateStartTimes[nextState] = time.Now()
-
-		// Check for completion
-		if nextState == StateComplete {
-			pCtx.Complete()
-			return pCtx.FinalAnswer, nil
+		// Update the current state if it wasn't changed to a terminal state by the transition
+		if !pCtx.IsTerminal() {
+			pCtx.CurrentState = nextState
+			pCtx.StateStartTimes[nextState] = time.Now() // Record start time for the new state
 		}
 	}
+
+	// Push the final terminal state (Complete, Error, Cancelled) onto the history stack
+	// This ensures the history always includes the final state.
+	// Note: Error/Cancelled states might have already been pushed if they occurred
+	// during context check or transition lookup failure, but appending again is harmless
+	// if the state hasn't changed (e.g., if SetError was called inside the transition).
+	// A simple check prevents duplicate appends if the state was already terminal *before* the loop check.
+	if len(pCtx.StateStack) == 0 || pCtx.StateStack[len(pCtx.StateStack)-1] != pCtx.CurrentState {
+		pCtx.StateStack = append(pCtx.StateStack, pCtx.CurrentState)
+	}
+
+	// Return the final answer and any error encountered (including cancellation)
+	return pCtx.FinalAnswer, pCtx.LastError
 }

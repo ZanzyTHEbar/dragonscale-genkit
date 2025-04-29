@@ -2,7 +2,7 @@ package adapters
 
 import (
 	"context"
-	"fmt"
+	"log"
 
 	"github.com/ZanzyTHEbar/dragonscale-genkit"
 	"github.com/firebase/genkit/go/core"
@@ -23,8 +23,8 @@ func NewGenkitRetrieverAdapter(flow *core.Flow[*string, string, struct{}]) *Genk
 // RetrieveContext implements the dragonscale.Retriever interface.
 func (a *GenkitRetrieverAdapter) RetrieveContext(ctx context.Context, query string, dag *dragonscale.ExecutionPlan) (string, error) {
 	if a.retrieverFlow == nil {
-		// Use standard Go logger since we might not have a genkit instance
-		return "", nil // Or return an error if retrieval is mandatory
+		log.Println("Retriever flow is not configured, skipping retrieval.")
+		return "", nil // Return empty string, not an error
 	}
 
 	// Prepare input for the retriever flow (example: just the query)
@@ -33,7 +33,8 @@ func (a *GenkitRetrieverAdapter) RetrieveContext(ctx context.Context, query stri
 	// Use genkit.RunFlow with the updated API
 	retrievedData, err := a.retrieverFlow.Run(ctx, &input)
 	if err != nil {
-		return "", fmt.Errorf("retriever flow execution failed: %w", err)
+		// Wrap the error using NewRetrieverError
+		return "", dragonscale.NewRetrieverError("retriever flow execution failed", err)
 	}
 
 	return retrievedData, nil

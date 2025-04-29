@@ -1,19 +1,19 @@
 package cache
 
 import (
-	"context"
-	"log"
-	"sync"
-	"time"
+"context"
+"sync"
+"time"
 
-	"github.com/ZanzyTHEbar/errbuilder-go"
+"github.com/ZanzyTHEbar/errbuilder-go"
 )
 
 // InMemoryCache provides a simple thread-safe in-memory cache.
 type InMemoryCache struct {
-	store map[string]cacheItem
-	mutex sync.RWMutex
-	ttl   time.Duration
+	store  map[string]cacheItem
+	mutex  sync.RWMutex
+	ttl    time.Duration
+	logger Logger
 }
 
 type cacheItem struct {
@@ -23,9 +23,15 @@ type cacheItem struct {
 
 // NewInMemoryCache creates a new in-memory cache with a default TTL.
 func NewInMemoryCache(defaultTTL time.Duration) *InMemoryCache {
+	return NewInMemoryCacheWithLogger(defaultTTL, &StdLogger{})
+}
+
+// NewInMemoryCacheWithLogger creates a new in-memory cache with a default TTL and custom logger.
+func NewInMemoryCacheWithLogger(defaultTTL time.Duration, logger Logger) *InMemoryCache {
 	c := &InMemoryCache{
-		store: make(map[string]cacheItem),
-		ttl:   defaultTTL,
+		store:  make(map[string]cacheItem),
+		ttl:    defaultTTL,
+		logger: logger,
 	}
 	// Start a background cleanup goroutine
 	go c.cleanupLoop(10 * time.Minute)
@@ -49,7 +55,9 @@ func (c *InMemoryCache) Get(ctx context.Context, key string) (interface{}, error
 
 	if time.Now().UnixNano() > item.expiration {
 		// Item expired (lazy cleanup)
-		log.Printf("Cache item expired: %s", key)
+		if c.logger != nil {
+			c.logger.Info("Cache item expired", map[string]interface{}{"key": key})
+		}
 		return nil, errbuilder.NotFoundErr(errbuilder.GenericErr("cache item expired", nil))
 	}
 
@@ -71,7 +79,9 @@ func (c *InMemoryCache) Set(ctx context.Context, key string, value interface{}) 
 		value:      value,
 		expiration: expiration,
 	}
-	log.Printf("Cache item set: %s", key)
+	if c.logger != nil {
+		c.logger.Info("Cache item set", map[string]interface{}{"key": key})
+	}
 	return nil
 }
 

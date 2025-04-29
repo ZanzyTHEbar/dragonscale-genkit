@@ -3,6 +3,8 @@ package adapters
 import (
 	"context"
 	"fmt"
+
+	"github.com/ZanzyTHEbar/dragonscale-genkit"
 )
 
 // GoToolAdapter adapts a standard Go function to the dragonscale.Tool interface.
@@ -89,7 +91,8 @@ func NewGoToolAdapter(
 		validator: func(input map[string]interface{}) error {
 			// Default validator just ensures input is not nil
 			if input == nil {
-				return fmt.Errorf("input cannot be nil")
+				// Use ToolValidationError for default validation failure
+				return dragonscale.NewToolValidationError(name, "input cannot be nil", nil)
 			}
 			return nil
 		},
@@ -106,15 +109,27 @@ func NewGoToolAdapter(
 // Execute implements the dragonscale.Tool interface.
 func (a *GoToolAdapter) Execute(ctx context.Context, input map[string]interface{}) (map[string]interface{}, error) {
 	if a.toolFunc == nil {
-		return nil, fmt.Errorf("tool function is nil")
+		// Use ConfigurationError if the underlying function is nil
+		return nil, dragonscale.NewConfigurationError("tool:"+a.name, "tool function is nil", nil)
 	}
 
 	// Validate input before execution
 	if err := a.Validate(input); err != nil {
-		return nil, fmt.Errorf("input validation failed for %s: %w", a.name, err)
+		// Error from Validate should already be ToolValidationError, just return it
+		// If Validate returns a non-DragonScaleError, wrap it.
+		if _, ok := err.(*dragonscale.DragonScaleError); !ok {
+			err = dragonscale.NewToolValidationError(a.name, fmt.Sprintf("input validation failed: %v", err), err)
+		}
+		return nil, err
 	}
 
-	return a.toolFunc(ctx, input)
+	// Execute the actual tool function
+	result, err := a.toolFunc(ctx, input)
+	if err != nil {
+		// Wrap execution errors in ToolExecutionError
+		return nil, dragonscale.NewToolExecutionError(a.name, "tool execution failed", err)
+	}
+	return result, nil
 }
 
 // Schema implements the dragonscale.Tool interface.
@@ -125,7 +140,14 @@ func (a *GoToolAdapter) Schema() map[string]interface{} {
 // Validate implements the dragonscale.Tool interface.
 func (a *GoToolAdapter) Validate(input map[string]interface{}) error {
 	if a.validator != nil {
-		return a.validator(input)
+		err := a.validator(input)
+		if err != nil {
+			// Ensure the error returned by the custom validator is wrapped
+			if _, ok := err.(*dragonscale.DragonScaleError); !ok {
+				return dragonscale.NewToolValidationError(a.name, fmt.Sprintf("custom validation failed: %v", err), err)
+			}
+			return err // Return the already wrapped error
+		}
 	}
 	return nil
 }

@@ -29,11 +29,39 @@ DragonScale orchestrates AI workflows through a powerful pipeline:
 - 🔄 **Modular Architecture**: Easily swap components like planners, executors, and tools
 - 🛠️ **Extensible Tools**: Create custom tools with simple interfaces
 - 🧠 **Context-Aware**: Retrieve relevant information to improve response quality
-- 💾 **Caching**: Optimize performance with built-in caching
+- 💾 **Caching**: Optimize performance with built-in caching (in-memory or persistent)
 - 🧩 **Composable**: Build complex workflows from simple components
 - 🔌 **Firebase Genkit Integration**: Leverages Google's Genkit for AI capabilities
+- 🧪 **Testing**: Includes Go test scaffolding for core components
+- 📊 **Observability**: Structured logging for better traceability
 
 ## Installation
+
+## Testing
+
+Basic tests are provided for core components. Run all tests with:
+
+```bash
+go test ./...
+```
+
+## Observability
+
+DragonScale uses structured logging for cache and core operations. You can provide your own logger or use the built-in JSON logger for better traceability.
+
+## Cache Persistence
+
+You can use either an in-memory cache or a file-backed persistent cache:
+
+```go
+import "github.com/ZanzyTHEbar/dragonscale-genkit/internal/cache"
+
+// In-memory cache (default)
+memCache := cache.NewInMemoryCache(time.Minute * 5)
+
+// File-backed persistent cache
+persistentCache := cache.NewFilePersistentCache(time.Minute*5, "cache.json", &cache.StdLogger{})
+```
 
 ### Prerequisites
 

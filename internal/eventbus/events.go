@@ -128,6 +128,31 @@ func NewEvent(
 	}
 }
 
+func NewEmptyEvent(
+	eventType EventType,
+) *BaseEvent {
+	return &BaseEvent{
+		eventType: eventType,
+		payload:   nil,
+		metadata:  make(map[string]interface{}),
+		timestamp: time.Now().UnixNano(),
+	}
+}
+
+func (e *BaseEvent) Clone() *BaseEvent {
+	return &BaseEvent{
+		eventType:  e.eventType,
+		payload:    e.payload,
+		metadata:   e.metadata,
+		timestamp:  e.timestamp,
+		sourceInfo: e.sourceInfo,
+	}
+}
+
+func (e *BaseEvent) String() string {
+	return string(e.eventType)
+}
+
 // Type returns the event type
 func (e *BaseEvent) Type() EventType {
 	return e.eventType
