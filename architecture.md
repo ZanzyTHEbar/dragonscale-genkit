@@ -197,12 +197,12 @@ classDiagram
     
     class ToolNotFoundError {
         +DragonScaleError
-        +ToolName string
+        +ToolName: string
     }
     
     class ToolExecutionError {
         +DragonScaleError
-        +ToolName string
+        +ToolName: string
     }
     
     class PlannerError {
@@ -227,13 +227,13 @@ classDiagram
     
     class ArgResolutionError {
         +DragonScaleError
-        +TaskID string
-        +ArgumentName string
+        +TaskID: string
+        +ArgumentName: string
     }
     
     class ToolValidationError {
         +DragonScaleError
-        +ToolName string
+        +ToolName: string
     }
     
     DragonScaleError <|-- ConfigurationError
@@ -295,9 +295,9 @@ classDiagram
     }
     
     class ChannelEventBus {
-        +Subscribe(eventType, handler) Subscription
-        +Publish(ctx, event) error
-        +Close() error
+        +Subscribe(eventType, handler)
+        +Publish(ctx, event)
+        +Close()
     }
     
     Planner <|.. GenkitPlannerAdapter
